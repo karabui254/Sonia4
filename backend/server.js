@@ -504,6 +504,38 @@ app.get('/api/report.pdf', auth, requirePermission('reports:read'), async (req, 
   } catch (e) { res.status(500).json({ error: 'Unable to generate report' }); }
 });
 
+app.get('/api/production-report.pdf', auth, requirePermission('reports:read'), async (req, res) => {
+  try {
+    const production = await db.all(`SELECT p.*, f.batch flock_batch, f.breed
+      FROM production p
+      LEFT JOIN flocks f ON f.id=p.flock_id
+      WHERE p.is_voided=0
+      ORDER BY p.date DESC, p.id DESC`);
+    const eggs = production.reduce((sum, row) => sum + Number(row.trays || 0) * 30 + Number(row.loose_eggs || 0), 0);
+    const mortality = production.reduce((sum, row) => sum + Number(row.mortality || 0), 0);
+    const doc = new PDFDocument({ margin: 40 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="sonia-4-production-output.pdf"');
+    doc.pipe(res);
+    doc.fontSize(20).fillColor('#0d684b').text('Sonia 4.0 Farm');
+    doc.fontSize(13).fillColor('#333').text('Production Output Report');
+    doc.fontSize(10).text('Generated: ' + new Date().toLocaleString());
+    doc.moveDown();
+    doc.fontSize(11).text(`Production records: ${production.length}`);
+    doc.text(`Eggs produced: ${eggs.toLocaleString()}`);
+    doc.text(`Mortality recorded: ${mortality.toLocaleString()}`);
+    doc.moveDown();
+    doc.fontSize(12).fillColor('#0d684b').text('Production Records');
+    doc.fontSize(9).fillColor('#222');
+    if (!production.length) doc.text('No production records have been recorded.');
+    production.forEach(row => {
+      const eggsForRow = Number(row.trays || 0) * 30 + Number(row.loose_eggs || 0);
+      doc.text(`${row.date} | ${row.flock_batch || 'No flock'}${row.breed ? ` (${row.breed})` : ''} | ${row.trays || 0} trays + ${row.loose_eggs || 0} loose eggs = ${eggsForRow} eggs | mortality ${row.mortality || 0}`);
+    });
+    doc.end();
+  } catch (e) { res.status(500).json({ error: 'Unable to generate production report' }); }
+});
+
 app.get('/health', (req, res) => res.json({ ok: true, service: 'sonia-4-farm' }));
 app.use(express.static(path.join(ROOT_DIR, 'frontend')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(ROOT_DIR, 'frontend', 'index.html')));
