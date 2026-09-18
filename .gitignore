@@ -1,9 +1,14 @@
 node_modules/
 .venv/
 .env
+.env.*
+!.env.example
+!.env.development.example
+!.env.production.example
 data/*.db
 data/*.db-*
 data/.session-secret
+data/FIRST_LOGIN.txt
 backups/*
 !backups/.gitkeep
 FIRST_LOGIN.txt

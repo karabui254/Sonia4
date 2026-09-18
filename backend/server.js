@@ -1,154 +1,26 @@
-require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { DatabaseSync } = require('node:sqlite');
 const session = require('express-session');
 const { generateSecret, generateURI, verifySync } = require('otplib');
 const QRCode = require('qrcode');
 const PDFDocument = require('pdfkit');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { config, createDevelopmentSecret } = require('./config');
+const { migrate } = require('../database/migrate');
 
 const app = express();
 app.set('trust proxy', 1);
-const ROOT_DIR = path.join(__dirname, '..');
-const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = path.join(ROOT_DIR, 'data');
-const BACKUP_DIR = path.join(ROOT_DIR, 'backups');
+const ROOT_DIR = config.rootDir;
+const PORT = config.port;
+const DATA_DIR = config.dataDir;
+const BACKUP_DIR = config.backupDir;
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
-const database = new DatabaseSync(path.join(DATA_DIR, 'sonia4.db'));
-database.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-
-function initDb() {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'manager',
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_by INTEGER,
-      totp_secret TEXT,
-      totp_enabled INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS audit_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER,
-      action TEXT NOT NULL,
-      table_name TEXT NOT NULL,
-      record_id INTEGER,
-      timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-    );
-    CREATE TABLE IF NOT EXISTS flocks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      batch TEXT NOT NULL UNIQUE,
-      breed TEXT,
-      received INTEGER NOT NULL DEFAULT 0,
-      date_received TEXT,
-      supplier TEXT,
-      cost_per_chick REAL NOT NULL DEFAULT 0,
-      house TEXT,
-      mortality INTEGER NOT NULL DEFAULT 0,
-      culls INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS feed_entries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      type TEXT NOT NULL CHECK(type IN ('Chick Mash','Growers','Layers')),
-      supplier TEXT,
-      received_kg REAL NOT NULL DEFAULT 0,
-      cost_per_kg REAL NOT NULL DEFAULT 0,
-      consumed_kg REAL NOT NULL DEFAULT 0,
-      date TEXT NOT NULL,
-      flock_id INTEGER,
-      notes TEXT,
-      FOREIGN KEY (flock_id) REFERENCES flocks(id) ON DELETE SET NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_feed_date ON feed_entries(date);
-    CREATE TABLE IF NOT EXISTS purchases (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      category TEXT NOT NULL,
-      item TEXT NOT NULL,
-      supplier TEXT,
-      reference TEXT,
-      date TEXT NOT NULL,
-      quantity REAL NOT NULL DEFAULT 0,
-      unit_cost REAL NOT NULL DEFAULT 0,
-      payment_status TEXT NOT NULL DEFAULT 'Paid',
-      amount_paid REAL NOT NULL DEFAULT 0,
-      notes TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_purchase_date ON purchases(date);
-    CREATE TABLE IF NOT EXISTS production (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      flock_id INTEGER,
-      trays INTEGER NOT NULL DEFAULT 0,
-      loose_eggs INTEGER NOT NULL DEFAULT 0,
-      birds_sold INTEGER NOT NULL DEFAULT 0,
-      avg_weight_kg REAL NOT NULL DEFAULT 0,
-      mortality INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      FOREIGN KEY (flock_id) REFERENCES flocks(id) ON DELETE SET NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_production_date ON production(date);
-    CREATE TABLE IF NOT EXISTS customers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      phone TEXT,
-      location TEXT,
-      notes TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS sales (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      customer_id INTEGER,
-      type TEXT NOT NULL,
-      quantity REAL NOT NULL DEFAULT 0,
-      weight_kg REAL NOT NULL DEFAULT 0,
-      total REAL NOT NULL DEFAULT 0,
-      payment_status TEXT NOT NULL DEFAULT 'Paid',
-      amount_paid REAL NOT NULL DEFAULT 0,
-      notes TEXT,
-      FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
-    CREATE TABLE IF NOT EXISTS supplier_debts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      supplier TEXT NOT NULL UNIQUE,
-      opening_debt REAL NOT NULL DEFAULT 0,
-      feed_credit REAL NOT NULL DEFAULT 0,
-      other_credit REAL NOT NULL DEFAULT 0,
-      paid REAL NOT NULL DEFAULT 0,
-      notes TEXT
-    );
-  `);
-  // Safe upgrades for existing Sonia 4.0 SQLite databases.
-  const migrations = [
-    ['users','is_active','INTEGER NOT NULL DEFAULT 1'],
-    ['users','created_by','INTEGER'],
-    ['customers','customer_code','TEXT'],
-    ['supplier_debts','supplier_code','TEXT'],
-    ['feed_entries','total_cost','REAL NOT NULL DEFAULT 0'],
-    ['sales','price_per_tray','REAL NOT NULL DEFAULT 0']
-  ];
-  for (const [table,col,type] of migrations) {
-    const cols = database.prepare(`PRAGMA table_info(${table})`).all().map(x => x.name);
-    if (!cols.includes(col)) database.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
-  }
-  database.exec(`UPDATE customers SET customer_code='CUS-' || printf('%04d',id) WHERE customer_code IS NULL OR customer_code='';`);
-  database.exec(`UPDATE supplier_debts SET supplier_code='SUP-' || printf('%04d',id) WHERE supplier_code IS NULL OR supplier_code='';`);
-  database.exec(`UPDATE feed_entries SET total_cost=received_kg*cost_per_kg WHERE total_cost=0 AND received_kg>0 AND cost_per_kg>0;`);
-}
+const database = migrate(config.databasePath);
 
 const db = {
   async all(sql, params = []) { return database.prepare(sql).all(...params); },
@@ -160,10 +32,10 @@ const db = {
 };
 
 function getSessionSecret() {
-  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
   const f = path.join(DATA_DIR, '.session-secret');
   if (fs.existsSync(f)) return fs.readFileSync(f, 'utf8').trim();
-  const secret = crypto.randomBytes(48).toString('hex');
+  if (config.isProduction) throw new Error('SESSION_SECRET is required in production');
+  const secret = createDevelopmentSecret();
   fs.writeFileSync(f, secret, { mode: 0o600 });
   return secret;
 }
@@ -177,7 +49,7 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders: true, l
 
 app.use(session({
   name: 'sonia.sid',
-  secret: process.env.SESSION_SECRET || getSessionSecret(),
+  secret: config.sessionSecret || getSessionSecret(),
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -231,14 +103,18 @@ async function audit(userId, action, tableName, recordId) {
   await db.run('INSERT INTO audit_log(user_id,action,table_name,record_id) VALUES(?,?,?,?)', [userId || null, action, tableName, recordId || null]);
 }
 
-const adminUser = process.env.ADMIN_USERNAME || 'admin';
-const adminPass = process.env.ADMIN_PASSWORD || 'Sonia4@2026!';
+const adminUser = config.adminUsername;
 
 async function ensureAdmin() {
   const existing = await db.get('SELECT id FROM users WHERE username=?', [adminUser]);
   if (!existing) {
+    if (config.isProduction && !config.adminPassword) throw new Error('ADMIN_PASSWORD is required in production');
+    const adminPass = config.adminPassword || createDevelopmentSecret();
     await db.run('INSERT INTO users(username,password_hash,role) VALUES(?,?,?)', [adminUser, bcrypt.hashSync(adminPass, 12), 'admin']);
-    fs.writeFileSync(path.join(ROOT_DIR, 'FIRST_LOGIN.txt'), `Sonia 4.0 First Login\r\nUsername: ${adminUser}\r\nPassword: ${adminPass}\r\n\r\nFor security, create your own administrator account after login, sign in with it, then remove the default admin account.\r\n`);
+    if (!config.adminPassword) {
+      fs.writeFileSync(path.join(DATA_DIR, 'FIRST_LOGIN.txt'), `Sonia 4.0 First Login\r\nUsername: ${adminUser}\r\nPassword: ${adminPass}\r\n\r\nFor security, create your own administrator account after login, sign in with it, then remove the default admin account.\r\n`);
+      console.log(`Development administrator created. Credentials are in ${path.join(DATA_DIR, 'FIRST_LOGIN.txt')}`);
+    }
   }
 }
 
@@ -306,7 +182,7 @@ app.get('/api/dashboard', auth, requirePermission('production:read'), async (req
     const revenue = sales.reduce((a, s) => a + Number(s.total), 0);
     const eggs = prod.reduce((a, p) => a + Number(p.trays) * 30 + Number(p.loose_eggs), 0);
     const productionOnly = req.user.role === 'production_staff';
-    res.json({ metrics: { alive, mortality, consumed, feedCost, purchaseCost: productionOnly ? 0 : purchaseCost, revenue: productionOnly ? 0 : revenue, profit: productionOnly ? 0 : revenue - purchaseCost, eggs, debt: productionOnly ? 0 : debts.reduce((a, d) => a + Math.max(0, Number(d.remaining)), 0) }, flocks, feed, prod, purchases: productionOnly ? [] : purchases, sales: productionOnly ? [] : sales, debts: productionOnly ? [] : debts, firstEgg: process.env.FIRST_EGG_DATE || '2025-08-14' });
+    res.json({ metrics: { alive, mortality, consumed, feedCost, purchaseCost: productionOnly ? 0 : purchaseCost, revenue: productionOnly ? 0 : revenue, profit: productionOnly ? 0 : revenue - purchaseCost, eggs, debt: productionOnly ? 0 : debts.reduce((a, d) => a + Math.max(0, Number(d.remaining)), 0) }, flocks, feed, prod, purchases: productionOnly ? [] : purchases, sales: productionOnly ? [] : sales, debts: productionOnly ? [] : debts, firstEgg: config.firstEggDate });
   } catch (e) { res.status(500).json({ error: 'Dashboard service error' }); }
 });
 
@@ -440,7 +316,6 @@ app.use(express.static(path.join(ROOT_DIR, 'frontend')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(ROOT_DIR, 'frontend', 'index.html')));
 
 async function start() {
-  await initDb();
   await ensureAdmin();
   app.listen(PORT, '0.0.0.0', () => console.log(`Sonia 4.0 Farm listening on ${PORT}`));
 }

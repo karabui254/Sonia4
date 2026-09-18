@@ -5,7 +5,9 @@
   "type": "commonjs",
   "scripts": {
     "start": "node backend/server.js",
-    "dev": "node --watch backend/server.js"
+    "dev": "node --watch backend/server.js",
+    "db:migrate": "node database/migrate.js",
+    "db:seed": "node scripts/seed-database.js"
   },
   "engines": {
     "node": ">=22.5"
