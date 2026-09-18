@@ -11,6 +11,8 @@ const adminHash = bcrypt.hashSync('seed-only-password', 4);
 database.exec('BEGIN');
 try {
   database.prepare('INSERT INTO users(username,password_hash,role) VALUES(?,?,?)').run('seed-admin', adminHash, 'admin');
+  database.prepare('INSERT INTO users(username,password_hash,role) VALUES(?,?,?)').run('seed-manager', bcrypt.hashSync('seed-manager-password', 4), 'manager');
+  database.prepare('INSERT INTO users(username,password_hash,role) VALUES(?,?,?)').run('seed-production', bcrypt.hashSync('seed-production-password', 4), 'production_staff');
   const flock = database.prepare('INSERT INTO flocks(batch,breed,received,date_received,supplier,house) VALUES(?,?,?,?,?,?)').run('SEED-001', 'Layers', 100, '2026-01-01', 'Seed Supplier', 'House A');
   database.prepare('INSERT INTO feed_entries(type,supplier,received_kg,total_cost,cost_per_kg,consumed_kg,date,flock_id) VALUES(?,?,?,?,?,?,?,?)').run('Layers', 'Seed Supplier', 50, 5000, 100, 5, '2026-01-02', Number(flock.lastInsertRowid));
   database.prepare('INSERT INTO production(date,flock_id,trays,loose_eggs,mortality) VALUES(?,?,?,?,?)').run('2026-01-02', Number(flock.lastInsertRowid), 2, 4, 0);
