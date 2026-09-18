@@ -31,9 +31,20 @@ function initDb() {
       username TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'manager',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_by INTEGER,
       totp_secret TEXT,
       totp_enabled INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      table_name TEXT NOT NULL,
+      record_id INTEGER,
+      timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
     );
     CREATE TABLE IF NOT EXISTS flocks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +134,8 @@ function initDb() {
   `);
   // Safe upgrades for existing Sonia 4.0 SQLite databases.
   const migrations = [
+    ['users','is_active','INTEGER NOT NULL DEFAULT 1'],
+    ['users','created_by','INTEGER'],
     ['customers','customer_code','TEXT'],
     ['supplier_debts','supplier_code','TEXT'],
     ['feed_entries','total_cost','REAL NOT NULL DEFAULT 0'],
@@ -177,13 +190,45 @@ app.use(session({
 
 function auth(req, res, next) {
   if (!req.session.user) return res.status(401).json({ error: 'Authentication required' });
+  const currentUser = database.prepare('SELECT id,username,role,is_active FROM users WHERE id=?').get(req.session.user.id);
+  if (!currentUser || !currentUser.is_active) {
+    return req.session.destroy(() => res.status(401).json({ error: 'Account is inactive' }));
+  }
+  req.session.user = { id: currentUser.id, username: currentUser.username, role: currentUser.role };
+  req.user = req.session.user;
   next();
 }
+
+const PERMISSIONS = {
+  admin: ['*'],
+  manager: [
+    'flocks:read', 'flocks:write', 'production:read', 'production:write',
+    'feed:read', 'feed:write', 'purchases:read', 'purchases:write',
+    'suppliers:read', 'suppliers:write', 'customers:read', 'customers:write',
+    'sales:read', 'sales:write', 'expenses:read', 'expenses:write', 'reports:read'
+  ],
+  production_staff: [
+    'flocks:read', 'production:read', 'production:write', 'feed:read', 'feed:write'
+  ]
+};
+
+function requirePermission(permission) {
+  return (req, res, next) => {
+    const allowed = PERMISSIONS[req.user?.role] || [];
+    if (allowed.includes('*') || allowed.includes(permission)) return next();
+    return res.status(403).json({ error: 'Forbidden' });
+  };
+}
+
 function role(...roles) {
   return (req, res, next) => {
-    if (!req.session.user || !roles.includes(req.session.user.role)) return res.status(403).json({ error: 'Insufficient permission' });
+    if (!req.user || !roles.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permission' });
     next();
   };
+}
+
+async function audit(userId, action, tableName, recordId) {
+  await db.run('INSERT INTO audit_log(user_id,action,table_name,record_id) VALUES(?,?,?,?)', [userId || null, action, tableName, recordId || null]);
 }
 
 const adminUser = process.env.ADMIN_USERNAME || 'admin';
@@ -201,7 +246,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password, otp } = req.body || {};
     const u = await db.get('SELECT * FROM users WHERE username=?', [username || '']);
-    if (!u || !bcrypt.compareSync(password || '', u.password_hash)) return res.status(401).json({ error: 'Invalid username or password' });
+    if (!u || !u.is_active || !bcrypt.compareSync(password || '', u.password_hash)) return res.status(401).json({ error: 'Invalid username or password' });
     if (u.totp_enabled) {
       if (!otp) return res.json({ requires2fa: true });
       let ok = false;
@@ -245,7 +290,7 @@ app.post('/api/auth/2fa/confirm', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Unable to confirm 2FA' }); }
 });
 
-app.get('/api/dashboard', auth, async (req, res) => {
+app.get('/api/dashboard', auth, requirePermission('production:read'), async (req, res) => {
   try {
     const flocks = await db.all('SELECT * FROM flocks ORDER BY id DESC');
     const feed = await db.all('SELECT * FROM feed_entries ORDER BY date DESC,id DESC');
@@ -260,7 +305,8 @@ app.get('/api/dashboard', auth, async (req, res) => {
     const purchaseCost = purchases.reduce((a, p) => a + Number(p.quantity) * Number(p.unit_cost), 0);
     const revenue = sales.reduce((a, s) => a + Number(s.total), 0);
     const eggs = prod.reduce((a, p) => a + Number(p.trays) * 30 + Number(p.loose_eggs), 0);
-    res.json({ metrics: { alive, mortality, consumed, feedCost, purchaseCost, revenue, profit: revenue - purchaseCost, eggs, debt: debts.reduce((a, d) => a + Math.max(0, Number(d.remaining)), 0) }, flocks, feed, prod, purchases, sales, debts, firstEgg: process.env.FIRST_EGG_DATE || '2025-08-14' });
+    const productionOnly = req.user.role === 'production_staff';
+    res.json({ metrics: { alive, mortality, consumed, feedCost, purchaseCost: productionOnly ? 0 : purchaseCost, revenue: productionOnly ? 0 : revenue, profit: productionOnly ? 0 : revenue - purchaseCost, eggs, debt: productionOnly ? 0 : debts.reduce((a, d) => a + Math.max(0, Number(d.remaining)), 0) }, flocks, feed, prod, purchases: productionOnly ? [] : purchases, sales: productionOnly ? [] : sales, debts: productionOnly ? [] : debts, firstEgg: process.env.FIRST_EGG_DATE || '2025-08-14' });
   } catch (e) { res.status(500).json({ error: 'Dashboard service error' }); }
 });
 
@@ -275,7 +321,8 @@ const resources = {
 };
 
 for (const [name, r] of Object.entries(resources)) {
-  app.get('/api/' + name, auth, async (req, res) => {
+  const permissionName = name === 'debts' ? 'suppliers' : name;
+  app.get('/api/' + name, auth, requirePermission(`${permissionName}:read`), async (req, res) => {
     try {
       if (name === 'production') return res.json(await db.all('SELECT p.*,f.batch flock_batch FROM production p LEFT JOIN flocks f ON f.id=p.flock_id ORDER BY p.id DESC'));
       if (name === 'sales') return res.json(await db.all('SELECT s.*,c.name customer,c.customer_code FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC'));
@@ -283,17 +330,19 @@ for (const [name, r] of Object.entries(resources)) {
     }
     catch (e) { res.status(500).json({ error: e.message }); }
   });
-  app.post('/api/' + name, auth, async (req, res) => {
+  app.post('/api/' + name, auth, requirePermission(`${permissionName}:write`), async (req, res) => {
     const body = req.body || {};
     try {
       if (name === 'debts') {
         const existing = await db.get('SELECT * FROM supplier_debts WHERE supplier=?', [body.supplier || '']);
         if (existing) {
           await db.run('UPDATE supplier_debts SET feed_credit=feed_credit+?, other_credit=other_credit+?, paid=paid+?, notes=? WHERE id=?', [Number(body.feed_credit || 0), Number(body.other_credit || 0), Number(body.paid || 0), body.notes || existing.notes, existing.id]);
+          await audit(req.user.id, 'update', r.table, existing.id);
           return res.json({ id: existing.id });
         }
         const result = await db.run('INSERT INTO supplier_debts(supplier,opening_debt,feed_credit,other_credit,paid,notes) VALUES(?,?,?,?,?,?)', [body.supplier, Number(body.opening_debt || 0), Number(body.feed_credit || 0), Number(body.other_credit || 0), Number(body.paid || 0), body.notes || '']);
         await db.run('UPDATE supplier_debts SET supplier_code=? WHERE id=?', [`SUP-${String(result.insertId).padStart(4,'0')}`, result.insertId]);
+        await audit(req.user.id, 'create', r.table, result.insertId);
         return res.json({ id: result.insertId });
       }
       if (name === 'feed') {
@@ -311,43 +360,47 @@ for (const [name, r] of Object.entries(resources)) {
       const placeholders = r.fields.map(() => '?').join(',');
       const result = await db.run(`INSERT INTO ${r.table} (${r.fields.join(',')}) VALUES (${placeholders})`, vals);
       if (name === 'customers') await db.run(`UPDATE customers SET customer_code=? WHERE id=?`, [`CUS-${String(result.insertId).padStart(4,'0')}`, result.insertId]);
+      await audit(req.user.id, 'create', r.table, result.insertId);
       res.json({ id: result.insertId });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
-  app.put('/api/' + name + '/:id', auth, async (req, res) => {
+  app.put('/api/' + name + '/:id', auth, requirePermission(`${permissionName}:write`), async (req, res) => {
     const body = req.body || {};
     const fields = r.fields.filter(f => body[f] !== undefined);
     if (!fields.length) return res.json({ ok: true });
     try {
       await db.run(`UPDATE ${r.table} SET ${fields.map(f => f + '=?').join(',')} WHERE id=?`, [...fields.map(f => body[f]), req.params.id]);
+      await audit(req.user.id, 'update', r.table, req.params.id);
       res.json({ ok: true });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
-  app.delete('/api/' + name + '/:id', auth, role('admin'), async (req, res) => {
-    try { await db.run(`DELETE FROM ${r.table} WHERE id=?`, [req.params.id]); res.json({ ok: true }); }
+  app.delete('/api/' + name + '/:id', auth, requirePermission(`${permissionName}:write`), async (req, res) => {
+    try { await db.run(`DELETE FROM ${r.table} WHERE id=?`, [req.params.id]); await audit(req.user.id, 'delete', r.table, req.params.id); res.json({ ok: true }); }
     catch (e) { res.status(400).json({ error: e.message }); }
   });
 }
 
-app.get('/api/users', auth, role('admin'), async (req, res) => {
-  try { res.json(await db.all('SELECT id,username,role,totp_enabled,created_at FROM users ORDER BY id')); }
+app.get('/api/users', auth, requirePermission('users:manage'), async (req, res) => {
+  try { res.json(await db.all('SELECT id,username,role,is_active,totp_enabled,created_at FROM users ORDER BY id')); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/users', auth, role('admin'), async (req, res) => {
+app.post('/api/users', auth, requirePermission('users:manage'), async (req, res) => {
   const { username, password, role: rl = 'manager' } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (!['admin', 'manager', 'production_staff'].includes(rl)) return res.status(400).json({ error: 'Invalid role' });
   try {
-    const result = await db.run('INSERT INTO users(username,password_hash,role) VALUES(?,?,?)', [username, bcrypt.hashSync(password, 12), rl]);
+    const result = await db.run('INSERT INTO users(username,password_hash,role,is_active,created_by) VALUES(?,?,?,1,?)', [username, bcrypt.hashSync(password, 12), rl, req.user.id]);
+    await audit(req.user.id, 'create', 'users', result.insertId);
     res.json({ id: result.insertId });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.delete('/api/users/:id', auth, role('admin'), async (req, res) => {
+app.delete('/api/users/:id', auth, requirePermission('users:manage'), async (req, res) => {
   if (Number(req.params.id) === req.session.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
-  try { await db.run('DELETE FROM users WHERE id=?', [req.params.id]); res.json({ ok: true }); }
+  try { await db.run('DELETE FROM users WHERE id=?', [req.params.id]); await audit(req.user.id, 'delete', 'users', req.params.id); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-app.get('/api/report.pdf', auth, async (req, res) => {
+app.get('/api/report.pdf', auth, requirePermission('reports:read'), async (req, res) => {
   try {
     const data = await db.all('SELECT * FROM production ORDER BY date DESC');
     const flocks = await db.all('SELECT * FROM flocks');
