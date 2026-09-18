@@ -93,10 +93,9 @@ async function getRecord(table, id) {
 
 async function recalculateFlockCurrentCount(flockId) {
   if (!flockId) return;
-  const flock = await db.get('SELECT initial_bird_count,mortality,culls FROM flocks WHERE id=?', [flockId]);
+  const flock = await db.get('SELECT initial_bird_count,mortality FROM flocks WHERE id=?', [flockId]);
   if (!flock) return;
-  const productionMortality = await db.get('SELECT COALESCE(SUM(mortality),0) mortality FROM production WHERE flock_id=? AND is_voided=0', [flockId]);
-  const current = Math.max(0, Number(flock.initial_bird_count) - Number(flock.mortality) - Number(flock.culls) - Number(productionMortality.mortality));
+  const current = Math.max(0, Number(flock.initial_bird_count) - Number(flock.mortality));
   await db.run('UPDATE flocks SET current_bird_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?', [current, flockId]);
 }
 
@@ -486,7 +485,7 @@ app.get('/api/report.pdf', auth, requirePermission('reports:read'), async (req, 
     doc.text('Generated: ' + new Date().toLocaleString());
     doc.moveDown();
     const metric = (label, val) => doc.fontSize(11).fillColor('#333').text(`${label}: ${val}`);
-    metric('Current flock', flocks.reduce((a, f) => a + Number(f.received) - Number(f.mortality) - Number(f.culls), 0));
+    metric('Current flock', flocks.reduce((a, f) => a + Number(f.current_bird_count ?? Math.max(0, Number(f.initial_bird_count || f.received) - Number(f.mortality))), 0));
     metric('Eggs produced', data.reduce((a, p) => a + Number(p.trays) * 30 + Number(p.loose_eggs), 0));
     metric('Feed consumed', feed.reduce((a, f) => a + Number(f.consumed_kg), 0).toFixed(1) + ' kg');
     metric('Purchases', purchases.reduce((a, p) => a + Number(p.quantity) * Number(p.unit_cost), 0).toLocaleString() + ' KES');

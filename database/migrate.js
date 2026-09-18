@@ -6,7 +6,8 @@ const migrations = [
   require('./migrations/002_legacy_upgrades'),
   require('./migrations/003_access_control_records'),
   require('./migrations/004_audit_void_fields'),
-  require('./migrations/005_master_data')
+  require('./migrations/005_master_data'),
+  require('./migrations/006_flock_current_count_formula')
 ];
 
 function migrate(databasePath) {

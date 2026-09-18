@@ -17,7 +17,7 @@ module.exports = {
       UPDATE flocks
       SET placement_date = COALESCE(placement_date, date_received),
           initial_bird_count = CASE WHEN initial_bird_count = 0 THEN received ELSE initial_bird_count END,
-          current_bird_count = CASE WHEN current_bird_count = 0 THEN MAX(0, received - mortality - culls) ELSE current_bird_count END;
+          current_bird_count = CASE WHEN current_bird_count = 0 THEN MAX(0, initial_bird_count - mortality) ELSE current_bird_count END;
       CREATE INDEX IF NOT EXISTS idx_flocks_status ON flocks(status);
     `);
 

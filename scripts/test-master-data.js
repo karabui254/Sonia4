@@ -30,7 +30,7 @@ async function main() {
   expect(activeFlocks.body.some(row => row.id === flockId), 'Active flock is available for lookup');
   status(await request(manager, 'POST', '/api/production', { date: '2026-09-18', flock_id: flockId, trays: 1, loose_eggs: 0, mortality: 3 }), 200, 'Production records mortality');
   const flockRows = (await request(admin, 'GET', '/api/flocks?include_voided=1')).body;
-  expect(flockRows.find(row => row.id === flockId).current_bird_count === 117, 'Current bird count is maintained');
+  expect(flockRows.find(row => row.id === flockId).current_bird_count === 120, 'Current bird count is maintained from initial count minus flock mortality');
   status(await request(admin, 'PUT', `/api/flocks/${flockId}`, { status: 'Closed' }), 200, 'Admin closes flock');
   expect(!(await request(manager, 'GET', '/api/flocks?active_only=1')).body.some(row => row.id === flockId), 'Closed flock is excluded from lookups');
   expect((await request(manager, 'GET', '/api/flocks?include_voided=1')).body.some(row => row.id === flockId), 'Closed flock remains in history');
