@@ -13,6 +13,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
+app.set('trust proxy', 1);
 const ROOT_DIR = path.join(__dirname, '..');
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.join(ROOT_DIR, 'data');
@@ -162,7 +163,8 @@ app.use(express.urlencoded({ extended: false }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false }));
 
 app.use(session({
-  secret: getSessionSecret(),
+  name: 'sonia.sid',
+  secret: process.env.SESSION_SECRET || getSessionSecret(),
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -387,6 +389,6 @@ app.get('/{*splat}', (req, res) => res.sendFile(path.join(ROOT_DIR, 'frontend', 
 async function start() {
   await initDb();
   await ensureAdmin();
-  app.listen(PORT, () => console.log(`Sonia 4.0 Farm listening on ${PORT}`));
+  app.listen(PORT, '0.0.0.0', () => console.log(`Sonia 4.0 Farm listening on ${PORT}`));
 }
 start().catch(err => { console.error('Startup failed:', err); process.exit(1); });
