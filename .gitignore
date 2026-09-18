@@ -1,0 +1,10 @@
+node_modules/
+.env
+data/*.db
+data/*.db-*
+data/.session-secret
+backups/*
+!backups/.gitkeep
+FIRST_LOGIN.txt
+*.log
+.DS_Store
