@@ -25,12 +25,14 @@ const database=migrate(config.databasePath);
 const op=createOperations(database);
 const store=new SQLiteSessionStore(config.sessionPath);
 const app=express();
+// Cookies are scoped to hosts, not ports: isolate demos from the real local farm.
+const cookieName=config.environment==='test'?`sonia.demo.${config.port}.sid`:'sonia.sid';
 app.set('trust proxy',1);
 app.use(helmet());
 app.get('/health',(req,res)=>{try{database.prepare('SELECT 1').get();res.json({ok:true,service:'sonia-4-farm'})}catch{res.status(503).json({ok:false})}});
 app.use(express.json({limit:'1mb'}));
 app.use('/api',rateLimit({windowMs:15*60*1000,limit:config.environment==='test'?10000:2000,standardHeaders:'draft-8',legacyHeaders:false}));
-app.use(session({name:'sonia.sid',secret,store,resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'strict',secure:config.isProduction,maxAge:8*60*60*1000}}));
+app.use(session({name:cookieName,secret,store,resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'strict',secure:config.isProduction,maxAge:8*60*60*1000}}));
 app.use('/api',(req,res,next)=>{
   res.setHeader('Cache-Control','no-store');
   if(!['GET','HEAD','OPTIONS'].includes(req.method)){
@@ -64,7 +66,7 @@ app.post('/api/auth/login',rateLimit({windowMs:15*60*1000,limit:config.environme
   res.json({user:safeUser(u),permissions:permissionsForRole(u.role)});
 }));
 app.get('/api/auth/me',(req,res,next)=>{if(!req.session.user)return res.json({user:null,permissions:[]});auth(req,res,()=>res.json({user:safeUser(req.user),permissions:permissionsForRole(req.user.role)}))});
-app.post('/api/auth/logout',(req,res)=>req.session.destroy(e=>{res.clearCookie('sonia.sid');res.status(e?500:200).json(e?{error:'Unable to sign out'}:{ok:true})}));
+app.post('/api/auth/logout',(req,res)=>req.session.destroy(e=>{res.clearCookie(cookieName);res.status(e?500:200).json(e?{error:'Unable to sign out'}:{ok:true})}));
 app.post('/api/auth/password',auth,route(async(req,res)=>{
   const u=op.get('SELECT * FROM users WHERE id=?',req.user.id);
   if(typeof req.body.current_password!=='string'||!bcrypt.compareSync(req.body.current_password,u.password_hash))throw new Error('Current password is incorrect');
