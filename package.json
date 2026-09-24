@@ -7,16 +7,14 @@
     "start": "node backend/server.js",
     "dev": "node --watch backend/server.js",
     "db:migrate": "node database/migrate.js",
-    "db:seed": "node scripts/seed-database.js",
     "test:access-control": "node --test --test-concurrency=1 scripts/workflow.test.js",
     "test:audit-void": "node --test --test-concurrency=1 scripts/workflow.test.js",
     "test:master-data": "node --test --test-concurrency=1 scripts/workflow.test.js",
-    "test": "node --test --test-concurrency=1 scripts/workflow.test.js",
+    "test": "node --test --test-concurrency=1 scripts/workflow.test.js scripts/mvp.test.js",
     "check": "node scripts/check.js",
     "backup": "node scripts/backup.js",
     "db:restore": "node scripts/restore.js",
-    "demo": "node scripts/demo.js",
-    "demo:sample": "node scripts/demo.js --sample"
+    "build:production": "node scripts/build-production.js"
   },
   "engines": {
     "node": ">=24.0.0 <25"

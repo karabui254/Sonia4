@@ -13,3 +13,11 @@ backups/**
 FIRST_LOGIN.txt
 *.log
 .DS_Store
+
+*.sqlite
+*.sqlite-*
+.session-secret
+**/.session-secret
+dist/
+work/
+.vscode/

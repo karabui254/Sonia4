@@ -12,6 +12,7 @@ const {config,createDevelopmentSecret}=require('./config');
 const {ROLES,permissionsForRole,can}=require('./access-control');
 const {migrate}=require('../database/migrate');
 const SQLiteSessionStore=require('./session-store');
+const sessionPolicy=require('./session-policy');
 const {createOperations,today,number,text}=require('./operations');
 fs.mkdirSync(config.dataDir,{recursive:true});
 function sessionSecret(){
@@ -32,7 +33,7 @@ app.use(helmet());
 app.get('/health',(req,res)=>{try{database.prepare('SELECT 1').get();res.json({ok:true,service:'sonia-4-farm'})}catch{res.status(503).json({ok:false})}});
 app.use(express.json({limit:'1mb'}));
 app.use('/api',rateLimit({windowMs:15*60*1000,limit:config.environment==='test'?10000:2000,standardHeaders:'draft-8',legacyHeaders:false}));
-app.use(session({name:cookieName,secret,store,resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'strict',secure:config.isProduction,maxAge:8*60*60*1000}}));
+app.use(session({name:cookieName,secret,store,rolling:true,resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'strict',secure:config.isProduction,maxAge:sessionPolicy.IDLE_MS}}));
 app.use('/api',(req,res,next)=>{
   res.setHeader('Cache-Control','no-store');
   if(!['GET','HEAD','OPTIONS'].includes(req.method)){
@@ -44,14 +45,15 @@ app.use('/api',(req,res,next)=>{
 });
 function auth(req,res,next){
   const s=req.session.user;if(!s)return res.status(401).json({error:'Authentication required'});
+  if(sessionPolicy.expired(req.session))return req.session.destroy(()=>{res.clearCookie(cookieName);res.status(401).json({error:'Your session has expired. Please sign in again.',code:'SESSION_EXPIRED'})});
   const user=op.get('SELECT id,username,role,is_active,session_version,totp_enabled FROM users WHERE id=?',s.id);
   if(!user||!user.is_active||s.session_version!==user.session_version)return req.session.destroy(()=>res.status(401).json({error:'Session expired. Sign in again.'}));
-  req.user=user;next();
+  sessionPolicy.touch(req.session);req.user=user;next();
 }
 function permit(permission){return (req,res,next)=>{if(can(req.user.role,permission))return next();op.audit(req.user,'denied','authorization',null,null,null,permission);res.status(403).json({error:'Forbidden'})}}
-function route(fn){return async(req,res,next)=>{try{await fn(req,res)}catch(e){if(e.code?.startsWith('SQLITE'))console.error('Database request failed:',e.message);const message=e.message?.includes('UNIQUE constraint')?'That record already exists':e.message;res.status(e.status||400).json({error:message||'Request failed'})}}}
+function route(fn){return async(req,res,next)=>{try{await fn(req,res)}catch(e){if(e.code?.startsWith('SQLITE'))console.error('Database request failed:',e.message);const databaseError=/SQLITE|constraint failed|no such (table|column)|syntax error/i.test(String(e.code||'')+' '+e.message);const message=e.message?.includes('UNIQUE constraint')?'That record already exists':databaseError?'Unable to save this record. Check the values or contact an administrator.':e.message;res.status(e.status||400).json({error:message||'Request failed'})}}}
 const saveSession=req=>new Promise((resolve,reject)=>req.session.save(e=>e?reject(e):resolve()));
-const regenerate=req=>new Promise((resolve,reject)=>req.session.regenerate(e=>e?reject(e):resolve()));
+const regenerate=req=>{const started=req.session.authenticatedAt;return new Promise((resolve,reject)=>req.session.regenerate(e=>{if(e)return reject(e);sessionPolicy.start(req.session,Date.now(),started??Date.now());resolve()}))};
 const userSession=u=>({id:u.id,username:u.username,role:u.role,session_version:u.session_version});
 const safeUser=u=>({id:u.id,username:u.username,role:u.role,totp_enabled:u.totp_enabled});
 function validPassword(p){if(typeof p!=='string'||p.length<12||Buffer.byteLength(p)>72)throw new Error('Password must be at least 12 characters and at most 72 UTF-8 bytes');return p}
@@ -62,7 +64,7 @@ app.post('/api/auth/login',rateLimit({windowMs:15*60*1000,limit:config.environme
   if(!u||!u.is_active||typeof password!=='string'||!bcrypt.compareSync(password,u.password_hash))return res.status(401).json({error:'Invalid username or password'});
   if(u.totp_enabled&&!otp)return res.json({requires2fa:true});
   if(u.totp_enabled&&!verifyOtp(otp,u.totp_secret))return res.status(401).json({error:'Invalid two-factor code'});
-  await regenerate(req);req.session.user=userSession(u);await saveSession(req);
+  await regenerate(req);sessionPolicy.start(req.session);req.session.user=userSession(u);await saveSession(req);
   res.json({user:safeUser(u),permissions:permissionsForRole(u.role)});
 }));
 app.get('/api/auth/me',(req,res,next)=>{if(!req.session.user)return res.json({user:null,permissions:[]});auth(req,res,()=>res.json({user:safeUser(req.user),permissions:permissionsForRole(req.user.role)}))});
@@ -94,6 +96,9 @@ app.post('/api/auth/2fa/disable',auth,route(async(req,res)=>{
   await regenerate(req);req.session.user=userSession(op.get('SELECT * FROM users WHERE id=?',u.id));await saveSession(req);res.json({ok:true});
 }));
 app.get('/api/dashboard',auth,permit('dashboard:read'),route((req,res)=>res.json(op.dashboard(req.user))));
+app.get('/api/mortality-review',auth,permit('flocks:write'),route((req,res)=>res.json(op.mortalityReport())));
+app.post('/api/mortality-review/:id',auth,permit('flocks:write'),route((req,res)=>res.json(op.reconcileMortality(number(req.params.id,'ID',1,true),req.body,req.user))));
+app.get('/api/production-trend',auth,permit('production:read'),route((req,res)=>res.json(op.productionTrend(req.query.period||'7'))));
 app.get('/api/feed-stock',auth,permit('feed:read'),route((req,res)=>res.json(op.stock())));
 for(const kind of Object.keys(op.tables)){
   app.get('/api/'+kind,auth,permit(`${kind}:read`),route((req,res)=>{let rows=op.list(kind,req.user,req.query.include_voided==='1');if(req.query.active_only==='1')rows=rows.filter(r=>r.status==='Active'&&!r.is_voided);res.json(rows)}));

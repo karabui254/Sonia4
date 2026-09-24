@@ -1,14 +1,26 @@
 # Sonia 4.0: full manual workflow test
 
-Use a blank isolated demo: `npm.cmd run demo`, then open http://localhost:3016. Do not enter these records into a real farm. A pre-filled version of the final scenario is available with `npm.cmd run demo:sample` (stop the blank demo first).
+Use a blank, isolated test farm with separate DATABASE_PATH and SESSION_PATH. Create test Manager and Production Staff accounts through Admin Settings using unique passwords. Do not enter these records into a real farm.
 
-Accounts: **demo-admin**, **demo-manager**, **demo-production**. Demo password for all three: **SoniaDemo-2026!**. These accounts are created only in a new demo database. Existing demo databases are preserved; changing between blank and sample demos uses different database files.
 
 Use TODAY as shown on the Dashboard for all dates. Run each step once on an empty demo; duplicate names/batches indicate it has already been used.
 
+Start an isolated blank test farm from the repository in PowerShell:
+
+```powershell
+$env:NODE_ENV="development"
+$env:PORT="3019"
+$env:DATA_DIR=Join-Path $PWD "data/manual-qa"
+$env:DATABASE_PATH=Join-Path $env:DATA_DIR "farm.db"
+$env:SESSION_PATH=Join-Path $env:DATA_DIR "sessions.db"
+npm.cmd start
+```
+
+Open http://localhost:3019. On first creation, obtain the generated Admin login from `data/manual-qa/FIRST_LOGIN.txt`. Never reuse that test account in production. These paths preserve the test farm on restart; use a fresh directory name for a fresh run.
+
 ## 1. Admin sets up the farm
 
-Sign in as demo-admin.
+Sign in as your test Admin account.
 
 | Section | Enter |
 |---|---|
@@ -21,7 +33,7 @@ Expected: current birds 100; unique SUP/CUS identifiers; no operational transact
 
 ## 2. Manager buys feed
 
-Sign out; sign in as demo-manager. Purchases & Payments:
+Sign out; sign in as your test Manager account. Purchases & Payments:
 
 | Field | Value |
 |---|---|
@@ -39,7 +51,7 @@ Expected cost per kg: **60**. Status: **Partially Paid**. Supplier outstanding: 
 
 ## 3. Production Staff records the day
 
-Sign out; sign in as demo-production.
+Sign out; sign in as your test Production Staff account.
 
 Production: select TEST-LAYERS-001; TODAY; **3 full trays + 4 loose eggs**, **2 damaged eggs**, **1 death**. Collected eggs are 94, usable eggs 92.
 
@@ -49,7 +61,7 @@ Expected: **94 Eggs Today**, **94% production rate**, **99 active birds**, **1 m
 
 ## 4. Manager records sale and expense
 
-Sign in as demo-manager.
+Sign in as your test Manager account.
 
 Sales & Receipts: TODAY; customer TEST Egg Customer; **2 trays**; initial receipt **400**.
 
@@ -79,7 +91,7 @@ Expected: both fully paid; customer and supplier outstanding **0**; sale count s
 
 ## 7. Corrections and audit
 
-Use demo-production to edit the production entry from 4 loose eggs to **3**, with reason Recount: one egg overreported. Dashboard must show **93 collected eggs**, **93% rate**, unchanged mortality/stock. Edit back to 4 with reason Restore sample count.
+Use your test Production Staff account to edit the production entry from 4 loose eggs to **3**, with reason Recount: one egg overreported. Dashboard must show **93 collected eggs**, **93% rate**, unchanged mortality/stock. Edit back to 4 with reason Restore sample count.
 
 As Manager, add expense Other / Duplicate example / **25**. Void it with reason Duplicate test entry. It disappears from active totals; Show voided displays it and Audit Log contains the reason and old/new values. Net profit returns to **−4,750**.
 
@@ -121,4 +133,4 @@ Production rate uses opening live birds (100), not closing birds (99). All-day m
 
 Download both reports and compare production/history and financial totals with the dashboard. Search finds sections, not record contents. Test at narrow browser width and using Tab/Enter.
 
-Stop the demo with Ctrl+C and restart the SAME demo command. Data should remain; a still-valid session should remain signed in. Demo sessions and farm data use separate SQLite files. `npm.cmd test` separately verifies WAL backup/restoration and HTTP session persistence on isolated fixtures.
+Stop the isolated test server with Ctrl+C and restart `npm.cmd start` with the same test environment variables. Data should remain; a still-valid session should remain signed in. Test sessions and farm data use separate SQLite files. `npm.cmd test` separately verifies WAL backup/restoration and HTTP session persistence on isolated fixtures.

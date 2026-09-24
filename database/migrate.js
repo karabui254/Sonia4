@@ -8,7 +8,8 @@ const migrations = [
   require('./migrations/004_audit_void_fields'),
   require('./migrations/005_master_data'),
   require('./migrations/006_flock_current_count_formula'),
-  require('./migrations/007_operations')
+  require('./migrations/007_operations'),
+  require('./migrations/008_mortality_reconciliation')
 ];
 
 function migrate(databasePath) {
@@ -21,18 +22,24 @@ function migrate(databasePath) {
   )`);
 
   const applied = new Set(database.prepare('SELECT id FROM schema_migrations').all().map(row => row.id));
-  for (const migration of migrations) {
-    if (applied.has(migration.id)) continue;
-    database.exec('BEGIN');
-    try {
-      migration.up(database);
+  const hasFlocks = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='flocks'").get();
+  const hasCount = hasFlocks && database.prepare('PRAGMA table_info(flocks)').all().some(c=>c.name==='current_bird_count');
+  const legacyFlockCounts = hasCount ? database.prepare('SELECT id,current_bird_count FROM flocks').all() : [];
+  // Keep a multi-version upgrade atomic, including restoration of legacy counts.
+  let activeMigration;
+  database.exec('BEGIN');
+  try {
+    for (const migration of migrations) {
+      if (applied.has(migration.id)) continue;
+      activeMigration=migration.id;
+      migration.up(database, { legacyFlockCounts });
       database.prepare('INSERT INTO schema_migrations(id) VALUES(?)').run(migration.id);
-      database.exec('COMMIT');
-    } catch (error) {
-      database.exec('ROLLBACK');
-      database.close();
-      throw new Error(`Migration ${migration.id} failed: ${error.message}`);
     }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    database.close();
+    throw new Error(`Migration ${activeMigration} failed: ${error.message}`);
   }
 
   return database;

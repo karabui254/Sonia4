@@ -68,22 +68,22 @@ test('WAL online backup restores committed rows; migrations remain repeatable',a
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sonia-backup-'));
  let db;try{const filename=path.join(dir,'live.db');db=migrate(filename);db.exec('PRAGMA wal_autocheckpoint=0');db.prepare("INSERT INTO customers(name) VALUES(?)").run('Committed in WAL');
  assert.ok(fs.existsSync(filename+'-wal'));const out=await createBackup(filename,path.join(dir,'backups'));const restored=path.join(dir,'restored.db');await restore(out,restored);
- const check=migrate(restored);assert.equal(check.prepare('SELECT name FROM customers').get().name,'Committed in WAL');assert.equal(check.prepare('SELECT COUNT(*) n FROM schema_migrations').get().n,7);check.close();
+ const check=migrate(restored);try{assert.equal(check.prepare('SELECT name FROM customers').get().name,'Committed in WAL');assert.equal(check.prepare('SELECT COUNT(*) n FROM schema_migrations').get().n,8);}finally{check.close()}
  await assert.rejects(()=>restore(out,restored),/exists/);
  }finally{db?.close();fs.rmSync(dir,{recursive:true,force:true})}
 });
 test('legacy migration preserves ambiguous debts and mortality without destructive conversion',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sonia-migrate-')),filename=path.join(dir,'old.db');
- const db=new DatabaseSync(filename);try{db.exec('PRAGMA foreign_keys=ON;CREATE TABLE schema_migrations(id TEXT PRIMARY KEY,applied_at TEXT DEFAULT CURRENT_TIMESTAMP)');for(const name of ['001_initial','002_legacy_upgrades','003_access_control_records','004_audit_void_fields','005_master_data','006_flock_current_count_formula']){require('../database/migrations/'+name).up(db);db.prepare('INSERT INTO schema_migrations(id) VALUES(?)').run(name)}db.exec("INSERT INTO flocks(batch,initial_bird_count,received,mortality) VALUES('OLD',100,100,3);INSERT INTO production(date,flock_id,mortality) VALUES('2026-01-01',1,3);INSERT INTO supplier_debts(supplier,opening_debt) VALUES('Legacy',100)")}finally{db.close()}
- const upgraded=migrate(filename);try{assert.equal(upgraded.prepare('SELECT COUNT(*) n FROM purchases').get().n,0);assert.equal(upgraded.prepare('SELECT opening_debt FROM supplier_debts').get().opening_debt,100);assert.equal(createOperations(upgraded).list('flocks',admin)[0].current_bird_count,97)}finally{upgraded.close();fs.rmSync(dir,{recursive:true,force:true})}
+ const db=new DatabaseSync(filename);try{db.exec('PRAGMA foreign_keys=ON;CREATE TABLE schema_migrations(id TEXT PRIMARY KEY,applied_at TEXT DEFAULT CURRENT_TIMESTAMP)');for(const name of ['001_initial','002_legacy_upgrades','003_access_control_records','004_audit_void_fields','005_master_data']){require('../database/migrations/'+name).up(db);db.prepare('INSERT INTO schema_migrations(id) VALUES(?)').run(name)}db.exec("INSERT INTO flocks(batch,initial_bird_count,received,mortality,current_bird_count) VALUES('OLD',100,100,3,96);INSERT INTO production(date,flock_id,mortality) VALUES('2026-01-01',1,3);INSERT INTO supplier_debts(supplier,opening_debt) VALUES('Legacy',100)")}finally{db.close()}
+ const upgraded=migrate(filename);try{assert.equal(upgraded.prepare('SELECT COUNT(*) n FROM purchases').get().n,0);assert.equal(upgraded.prepare('SELECT opening_debt FROM supplier_debts').get().opening_debt,100);assert.equal(createOperations(upgraded).list('flocks',admin)[0].current_bird_count,96)}finally{upgraded.close();fs.rmSync(dir,{recursive:true,force:true})}
 });
 test('HTTP roles, persistent sessions, user security, PDF and API errors',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sonia-http-'));
  const net=require('node:net');const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))})});
  const base=`http://127.0.0.1:${port}`;let child,logs='';
- async function start(){child=spawn(process.execPath,['backend/server.js'],{cwd:path.join(__dirname,'..'),env:{...process.env,NODE_ENV:'test',PORT:String(port),DATA_DIR:dir,DATABASE_PATH:path.join(dir,'farm.db'),SESSION_PATH:path.join(dir,'sessions.db'),ADMIN_PASSWORD:'TestPassword-2026!',SESSION_SECRET:'test-secret-long-enough-for-integration-tests'}});child.stdout.on('data',s=>{logs+=s});child.stderr.on('data',s=>{logs+=s});for(let i=0;i<100;i++){try{if((await fetch(base+'/health')).ok)return}catch{}await new Promise(r=>setTimeout(r,50))}throw new Error(logs)}
+ async function start(environment='test'){child=spawn(process.execPath,['backend/server.js'],{cwd:path.join(__dirname,'..'),env:{...process.env,NODE_ENV:environment,HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,DATABASE_PATH:path.join(dir,'farm.db'),SESSION_PATH:path.join(dir,'sessions.db'),ADMIN_PASSWORD:'TestPassword-2026!',SESSION_SECRET:'test-secret-long-enough-for-integration-tests'}});child.stdout.on('data',s=>{logs+=s});child.stderr.on('data',s=>{logs+=s});for(let i=0;i<100;i++){try{if((await fetch(base+'/health')).ok)return}catch{}await new Promise(r=>setTimeout(r,50))}throw new Error(logs)}
  async function stop(){if(!child||child.exitCode!==null)return;await new Promise(resolve=>{child.once('exit',resolve);child.kill()})}
- async function req(url,method='GET',body,cookie){const r=await fetch(base+'/api'+url,{method,headers:{'Content-Type':'application/json',...(cookie?{cookie}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,body:await r.json().catch(()=>null),cookie:r.headers.get('set-cookie')?.split(';')[0]}}
+ async function req(url,method='GET',body,cookie){const r=await fetch(base+'/api'+url,{method,headers:{'Content-Type':'application/json','X-Forwarded-Proto':'https',...(cookie?{cookie}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {cookieHeader:r.headers.get('set-cookie'),status:r.status,body:await r.json().catch(()=>null),cookie:r.headers.get('set-cookie')?.split(';')[0]}}
  try{
  await start();let a=await req('/auth/login','POST',{username:'admin',password:'TestPassword-2026!'});assert.equal(a.status,200,logs);const cookie=a.cookie;
  assert.equal((await req('/users','POST',{username:'manager',password:'ManagerPassword-2026!',role:'manager'},cookie)).status,200);
@@ -106,7 +106,30 @@ test('HTTP roles, persistent sessions, user security, PDF and API errors',async(
  assert.equal((await req('/users/1','PUT',{role:'manager',reason:'Test'},newCookie)).status,400);
  assert.equal((await req('/users/2','PUT',{is_active:false,reason:'Leaver'},newCookie)).status,200);
  assert.equal((await req('/auth/me','GET',undefined,m)).status,401);
+ assert.equal((await req('/users/3','PUT',{role:'manager',reason:'Role changed'},newCookie)).status,200);
+ assert.equal((await req('/production','GET',undefined,s)).status,401);
+ let staffLogin=await req('/auth/login','POST',{username:'production',password:'ProductionPassword-2026!'});
+ assert.equal((await req('/users/3','PUT',{reset_2fa:true,reason:'Security reset'},newCookie)).status,200);
+ assert.equal((await req('/production','GET',undefined,staffLogin.cookie)).status,401);
+ staffLogin=await req('/auth/login','POST',{username:'production',password:'ProductionPassword-2026!'});
+ assert.equal((await req('/auth/password','POST',{current_password:'ProductionPassword-2026!',new_password:'ChangedPassword-2026!'},staffLogin.cookie)).status,200);
+ assert.equal((await req('/production','GET',undefined,staffLogin.cookie)).status,401);
+ for(const kind of ['idle','absolute']){
+  const login=await req('/auth/login','POST',{username:'production',password:'ChangedPassword-2026!'});
+  const sessions=new DatabaseSync(path.join(dir,'sessions.db'));
+  try{for(const row of sessions.prepare('SELECT * FROM sessions').all()){
+   const value=JSON.parse(row.data);if(value.user?.id!==3)continue;
+   if(kind==='idle')value.lastActivityAt=Date.now()-46*60000;
+   else{value.authenticatedAt=Date.now()-11*3600000;value.lastActivityAt=Date.now()}
+   sessions.prepare('UPDATE sessions SET data=?,expires=? WHERE sid=?').run(JSON.stringify(value),Date.now()+60000,row.sid);
+  }}finally{sessions.close()}
+  assert.equal((await req('/production','GET',undefined,login.cookie)).status,401);
+ }
  assert.equal((await req('/auth/logout','POST',{},newCookie)).status,200);
+ await stop();await start('production');
+ const secure=await req('/auth/login','POST',{username:'production',password:'ChangedPassword-2026!'});
+ assert.equal(secure.status,200);for(const flag of ['HttpOnly','Secure','SameSite=Strict','Expires='])assert.ok(secure.cookieHeader.includes(flag),flag);
+
  }finally{await stop();fs.rmSync(dir,{recursive:true,force:true})}
 });
 

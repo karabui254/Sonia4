@@ -6,9 +6,7 @@ Express + SQLite farm operations with role-controlled production, feed, sales, p
 
 Use the Node 24 version in `.node-version`. Run `npm ci` then `npm start` (PowerShell: `npm.cmd`). Development creates `data/FIRST_LOGIN.txt` only for a new farm. Change the initial password in Settings. Do not copy demo accounts into production.
 
-For a separate blank demonstration farm run `npm run demo`, or `npm run demo:sample` for a pre-filled demonstration. Both use port 3016 by default and preserve their own data across restarts. They never open the normal `data/sonia4.db`. Stop one before starting the other. Set `DEMO_PORT` to change the port.
-
-See [Sample workflow](docs/SAMPLE-WORKFLOW.md) for exact entries and expected totals.
+Use the role checklist in [Sample workflow](docs/SAMPLE-WORKFLOW.md) against a separate disposable test farm. No demo accounts or sample rows are bundled in production.
 
 ## Roles
 
@@ -30,7 +28,7 @@ Net profit is a **simplified purchase-expensed measure**: sales − purchases �
 
 ## Existing installations
 
-Migrations 001–006 are preserved. Migration 007 adds payment histories and independent feed usage without deleting existing data. Existing amount-paid values become opening payment entries. Legacy feed entries continue contributing to stock; legacy debts remain read-only and separate from new supplier balances because they may duplicate purchase liabilities. Inspect Legacy Records before importing opening balances. Historical mortality may duplicate flock-level mortality; migrated flocks use an explicit baseline date to avoid automatic double subtraction. Reconcile it with actual birds. Do not silently clear warnings without checking the data.
+Migrations 001–006 are preserved. Migration 007 adds payment histories and independent feed usage without deleting existing data. Existing amount-paid values become opening payment entries. Legacy feed entries continue contributing to stock; legacy debts remain read-only and separate from new supplier balances because they may duplicate purchase liabilities. Inspect Legacy Records before importing opening balances. Migration 008 preserves the stored population of legacy flocks and marks them for Admin review. Use Mortality Review to confirm opening values and the historical cutoff before recording further deaths. Production history remains intact. New flocks use the authoritative calculation immediately.
 
 Always back up and rehearse against a restored copy before applying migrations to a real farm. The original running application is not automatically restarted or migrated by development work.
 
@@ -63,3 +61,9 @@ Run `npm run backup` against the configured database. It uses the SQLite online 
 Restore to a NEW path: `node scripts/restore.js BACKUP.db NEW_DATABASE.db`. Existing destinations are refused. Verify the restored application in an isolated process, then stop production and switch its database path in a controlled maintenance window. Restore is not a code rollback: do not run older code against newer schema without validation. Session restoration is intentionally separate; stable sessions remain in their own disk file.
 
 Backups do not delete themselves. Monitor disk usage, retain a documented number of verified generations (recommended starting policy: 7 daily and 4 weekly), and copy backups to protected off-disk storage before removing old generations. Scheduling/off-disk credentials must be configured on the hosting service; no external backup destination has been assumed.
+
+## MVP hardening
+
+Sessions persist across browser restarts within a 45-minute idle timeout and a 10-hour absolute lifetime. Security-sensitive account changes invalidate prior sessions; older sessions without policy timestamps require one fresh sign-in. Production cookies are Secure, HTTP-only and SameSite=Strict. Browser password managers remain under user control.
+
+`npm run build:production` creates a new allowlisted runtime directory under `dist/`. It excludes local databases, secrets, demo scripts, test fixtures and sample documentation. Automated tests, CI, migrations and backup/restore tools remain in source. See docs/MVP-READINESS.md before release.

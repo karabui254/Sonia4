@@ -36,6 +36,7 @@ function createOperations(db){
     return r;
   }
   function birdCount(f,day,beforeDay=false){
+    if(!f.mortality_reconciled)return Number(f.current_bird_count);
     const baseline=f.mortality_baseline_date;
     const deaths=get(`SELECT COALESCE(SUM(mortality),0) n FROM production WHERE flock_id=? AND is_voided=0 AND date${beforeDay?'<':'<='}? AND (? IS NULL OR date>?)`,f.id,day,baseline,baseline).n;
     return Number(f.initial_bird_count)-Number(f.mortality)-Number(f.culls)-deaths;
@@ -60,6 +61,11 @@ function createOperations(db){
       r.house=text(v.house,'House');r.supplier=text(v.supplier,'Supplier');r.cost_per_chick=number(v.cost_per_chick??0,'Cost per chick');
       if(r.mortality+r.culls>r.initial_bird_count)throw new Error('Losses exceed initial birds');
       r.current_bird_count=r.initial_bird_count-r.mortality-r.culls;
+      if(before&&!before.mortality_reconciled){
+        for(const key of ['initial_bird_count','mortality','culls','mortality_baseline_date'])if(r[key]!==before[key])throw new Error('Review historical opening values in Mortality Review first');
+        r.current_bird_count=before.current_bird_count;
+      }
+      if(!before){r.mortality_reconciled=1;r.mortality_reconciled_by=user.id;r.mortality_reconciled_at=new Date().toISOString()}
     }
     if(kind==='customers'||kind==='suppliers'){
       r.name=text(v.name,'Name',true);r.phone=text(v.phone,'Phone');r.location=text(v.location,'Location');r.status=choice(v.status||'Active',['Active','Inactive'],'status');
@@ -74,6 +80,8 @@ function createOperations(db){
         r.trays=number(v.trays??0,'Trays',0,true);r.loose_eggs=number(v.loose_eggs??0,'Loose eggs',0,true);
         if(r.loose_eggs>29)throw new Error('Loose eggs must be between 0 and 29');
         r.damaged_eggs=number(v.damaged_eggs??0,'Damaged eggs',0,true);r.mortality=number(v.mortality??0,'Mortality',0,true);
+        if(!f.mortality_reconciled&&(r.mortality>0||before?.mortality>0))throw new Error('Admin must reconcile this flock in Mortality Review before changing mortality');
+        if(before?.mortality>0&&before.flock_id!==r.flock_id&&!get('SELECT mortality_reconciled FROM flocks WHERE id=?',before.flock_id)?.mortality_reconciled)throw new Error('Reconcile the original flock before moving mortality');
         if(r.damaged_eggs>r.trays*30+r.loose_eggs)throw new Error('Damaged eggs cannot exceed collected eggs');
         if(f.mortality_baseline_date&&r.mortality>0&&r.date<=f.mortality_baseline_date&&!before)throw new Error('This mortality is covered by the legacy baseline. Reconcile the flock baseline first.');
       }else{r.type=choice(v.type,TYPES,'feed type');r.consumed_kg=number(v.consumed_kg,'Feed consumed',0.001)}
@@ -114,6 +122,7 @@ function createOperations(db){
   function stock(){const result=Object.fromEntries(TYPES.map(t=>[t,0]));for(const r of feedMovements())result[r.type]=(result[r.type]||0)+r.kg;return TYPES.map(type=>({type,available_kg:Math.round(result[type]*1000)/1000}))}
   function validateState(kind){
     if(['production','flocks'].includes(kind))for(const f of all('SELECT * FROM flocks WHERE is_voided=0')){
+      if(!f.mortality_reconciled)continue;
       if(birdCount(f,today())<0)throw new Error(`Mortality and culls exceed initial birds for ${f.batch}`);
       const outside=get('SELECT id FROM production WHERE flock_id=? AND is_voided=0 AND (date<? OR (? IS NOT NULL AND date>?))',f.id,f.placement_date,f.closed_date,f.closed_date);
       if(outside)throw new Error('Flock dates would exclude existing production');
@@ -154,6 +163,7 @@ function createOperations(db){
     const table=tables[kind],before=get(`SELECT * FROM ${table} WHERE id=?`,id),reason=text(body.reason,'Void reason',true);
     if(!before||before.is_voided)throw new Error('Active record not found');
     if(!correctable(user,kind,before))throw Object.assign(new Error('You cannot void this record'),{status:403});
+    if(kind==='production'&&before.mortality>0&&!get('SELECT mortality_reconciled FROM flocks WHERE id=?',before.flock_id)?.mortality_reconciled)throw new Error('Admin must reconcile this flock before voiding mortality');
     if(['sales','purchases'].includes(kind)&&paid(kind,id)>0)throw new Error('Void the linked payments first; record any actual refund separately in your cash records');
     const dependencies={flocks:[['production','flock_id'],['feed_usage','flock_id'],['feed_entries','flock_id']],customers:[['sales','customer_id']],suppliers:[['purchases','supplier_id'],['feed_entries','supplier_id'],['supplier_debts','supplier_id']]};
     for(const [t,k] of dependencies[kind]||[])if(get(`SELECT id FROM ${t} WHERE ${k}=? AND is_voided=0`,id))throw new Error('This master record has active transactions. Close or deactivate it instead.');
@@ -174,6 +184,40 @@ function createOperations(db){
     const reason=text(body.reason,'Void reason',true);run('UPDATE payments SET is_voided=1,voided_by=?,voided_at=CURRENT_TIMESTAMP,void_reason=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',user.id,reason,user.id,id);
     audit(user,'void','payments',id,before,get('SELECT * FROM payments WHERE id=?',id),reason);return {ok:true};
   })}
+  function mortalityReport(){
+    return all('SELECT f.*,u.username reconciled_by FROM flocks f LEFT JOIN users u ON u.id=f.mortality_reconciled_by WHERE f.is_voided=0 ORDER BY f.id').map(f=>{
+      const production=all('SELECT id,date,mortality,is_voided FROM production WHERE flock_id=? ORDER BY date,id',f.id);
+      const productionMortality=production.filter(p=>!p.is_voided).reduce((n,p)=>n+p.mortality,0);
+      const applicable=production.filter(p=>!p.is_voided&&(!f.mortality_baseline_date||p.date>f.mortality_baseline_date)).reduce((n,p)=>n+p.mortality,0);
+      const calculated=f.initial_bird_count-f.mortality-f.culls-applicable;
+      return {...f,production,production_mortality:productionMortality,applicable_production_mortality:applicable,calculated_current_birds:calculated,existing_current_birds:f.current_bird_count,difference:calculated-f.current_bird_count};
+    });
+  }
+  function reconcileMortality(id,body,user){return transaction(()=>{
+    if(user.role!=='admin')throw Object.assign(new Error('Forbidden'),{status:403});
+    const before=get('SELECT * FROM flocks WHERE id=? AND is_voided=0',id);
+    if(!before)throw new Error('Flock not found');
+    if(before.mortality_reconciled)throw new Error('This flock has already been reconciled. Use an audited flock correction if required.');
+    if(body.confirmed!==true)throw new Error('Confirm that you reviewed the historical sources');
+    const reason=text(body.reason,'Reconciliation reason',true);
+    const initial=number(body.initial_bird_count,'Confirmed initial birds',1,true),opening=number(body.mortality,'Confirmed opening mortality',0,true),culls=number(body.culls,'Confirmed culls',0,true);
+    const baseline=body.mortality_baseline_date?date(body.mortality_baseline_date,'Opening mortality cutoff'):null;
+    if(baseline&&before.placement_date&&baseline<before.placement_date)throw new Error('Cutoff cannot precede placement');
+    const deaths=get('SELECT COALESCE(SUM(mortality),0) n FROM production WHERE flock_id=? AND is_voided=0 AND (? IS NULL OR date>?)',id,baseline,baseline).n;
+    const current=initial-opening-culls-deaths;if(current<0)throw new Error('Confirmed losses exceed initial birds');
+    // An explicit expected count makes the administrator review the result, too.
+    if(number(body.confirmed_current_birds,'Confirmed current birds',0,true)!==current)throw new Error('Confirmed current birds do not match the proposed opening values and applicable production mortality');
+    run('UPDATE flocks SET initial_bird_count=?,received=?,mortality=?,culls=?,mortality_baseline_date=?,current_bird_count=?,mortality_reconciled=1,mortality_reconciled_by=?,mortality_reconciled_at=CURRENT_TIMESTAMP,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',initial,initial,opening,culls,baseline,current,user.id,user.id,id);
+    const after=get('SELECT * FROM flocks WHERE id=?',id);audit(user,'mortality-reconciliation','flocks',id,before,after,reason);return after;
+  })}
+  function productionTrend(period='7'){
+    if(!['7','30','monthly'].includes(period))throw new Error('Invalid production period');
+    const day=today(),start=new Date(day+'T00:00:00Z');
+    if(period==='monthly'){start.setUTCDate(1);start.setUTCMonth(start.getUTCMonth()-11)}else start.setUTCDate(start.getUTCDate()-Number(period)+1);
+    const records=all('SELECT date,SUM(trays*30+loose_eggs) eggs,SUM(damaged_eggs) damaged,COUNT(*) records FROM production WHERE is_voided=0 AND date>=? AND date<=? GROUP BY date ORDER BY date',start.toISOString().slice(0,10),day);
+    if(period!=='monthly')return {period,rows:records};
+    const months=new Map();for(const r of records){const key=r.date.slice(0,7),row=months.get(key)||{date:key,eggs:0,damaged:0,records:0};row.eggs+=r.eggs;row.damaged+=r.damaged;row.records+=r.records;months.set(key,row)}return {period,rows:[...months.values()]};
+  }
   function dashboard(user){
     const prod=list('production',user),flocks=list('flocks',user),usage=list('feed',user),day=today();
     const collected=p=>p.trays*30+p.loose_eggs;
@@ -185,7 +229,9 @@ function createOperations(db){
     const layingEggs=prod.filter(p=>p.date===day&&layingIds.has(p.flock_id)).reduce((n,p)=>n+collected(p),0);
     const trendMap=new Map();for(const p of prod){const row=trendMap.get(p.date)||{date:p.date,eggs:0,damaged:0};row.eggs+=collected(p);row.damaged+=p.damaged_eggs;trendMap.set(p.date,row)}
     const metrics={eggsToday,eggs:prod.reduce((n,p)=>n+collected(p),0),damagedEggs:prod.reduce((n,p)=>n+p.damaged_eggs,0),activeBirds:active.reduce((n,f)=>n+f.current_bird_count,0),mortality:allFlocks.reduce((n,f)=>n+f.initial_bird_count-f.culls-birdCount(f,day),0),productionRate:denominator?money(layingEggs/denominator*100):null,feedConsumed:usage.reduce((n,r)=>n+r.consumed_kg,0)+get('SELECT COALESCE(SUM(consumed_kg),0) n FROM feed_entries WHERE is_voided=0').n};
+    const pending=allFlocks.filter(f=>!f.mortality_reconciled).length;
     const result={today:day,metrics,stock:stock(),trend:[...trendMap.values()].sort((a,b)=>a.date.localeCompare(b.date)).slice(-14),production:prod.slice(0,10),notes:all('SELECT message FROM migration_notes').map(r=>r.message)};
+    if(pending)result.notes.unshift('Historical mortality review pending for '+pending+' flock(s). Stored bird counts are preserved until Admin confirmation; population-based metrics are provisional.');
     if(can(user.role,'sales:read')){
       const sales=list('sales',user),purchases=list('purchases',user),expenses=list('expenses',user);
       Object.assign(metrics,{sales:money(sales.reduce((n,s)=>n+s.total,0)),purchases:money(purchases.reduce((n,p)=>n+p.total,0)),expenses:money(expenses.reduce((n,e)=>n+e.amount,0)),customerOutstanding:money(sales.reduce((n,s)=>n+s.outstanding,0)),supplierOutstanding:money(purchases.reduce((n,p)=>n+p.outstanding,0))});
@@ -195,6 +241,6 @@ function createOperations(db){
     }
     return result;
   }
-  return {tables,all,get,run,transaction,audit,list,write,voidRecord,payment,voidPayment,dashboard,paid,stock,correctable};
+  return {tables,all,get,run,transaction,audit,list,write,voidRecord,payment,voidPayment,dashboard,paid,stock,correctable,mortalityReport,reconcileMortality,productionTrend};
 }
 module.exports={createOperations,today,number,date,text,money};
