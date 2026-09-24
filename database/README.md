@@ -1,5 +1,5 @@
-# Database
+# Database operations
 
-SQLite runtime files live in `data/` and are ignored by Git. Schema changes are applied in order by `database/migrate.js` and recorded in `schema_migrations`.
+The server and migration CLI share backend/config.js. All new schema changes must be numbered migrations; never change an applied migration or delete a farm database to upgrade it.
 
-Add a new numbered migration under `migrations/` for every future schema change. Do not delete `sonia4.db` to upgrade an installation.
+Migration 007 adds operational workflow tables and preserves legacy records. See README.md for reconciliation rules and scripts/backup.js and scripts/restore.js for verified WAL-safe backup and non-overwriting restoration. Rehearse migrations against a restored copy before touching production.

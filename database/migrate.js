@@ -7,7 +7,8 @@ const migrations = [
   require('./migrations/003_access_control_records'),
   require('./migrations/004_audit_void_fields'),
   require('./migrations/005_master_data'),
-  require('./migrations/006_flock_current_count_formula')
+  require('./migrations/006_flock_current_count_formula'),
+  require('./migrations/007_operations')
 ];
 
 function migrate(databasePath) {
@@ -38,7 +39,7 @@ function migrate(databasePath) {
 }
 
 if (require.main === module) {
-  const databasePath = process.argv[2] || path.join(process.cwd(), 'data', 'sonia4.db');
+  const databasePath = process.argv[2] || require('../backend/config').config.databasePath;
   const database = migrate(databasePath);
   console.log(`Database ready: ${databasePath}`);
   database.close();

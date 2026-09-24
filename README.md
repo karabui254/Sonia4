@@ -1,56 +1,65 @@
 # Sonia 4.0 Farm
 
-This repository contains the complete editable source for Sonia 4.0 Farm.
+Express + SQLite farm operations with role-controlled production, feed, sales, payments, corrections and reporting.
 
-## Architecture
-- `frontend/` — browser UI (HTML, CSS, JavaScript, images)
-- `backend/server.js` — Node.js/Express API, authentication and business logic
-- `backend/config.js` — environment-aware runtime configuration
-- `database/` — numbered SQLite migrations and migration runner
-- `data/` — runtime SQLite database (ignored by Git)
-- `backups/` — local database backups (ignored by Git)
-- `scripts/` — Windows start/backup helpers
+## Local start
 
-## Run in VS Code
-1. Install Node.js 22 or newer.
-2. Open this folder in VS Code.
-3. Open Terminal.
-4. Copy `.env.development.example` to `.env.development` (or use `.env.example` as `.env`).
-5. Run `npm.cmd install` on PowerShell if the `npm` script is blocked by execution policy.
-6. Run `npm.cmd start`.
-7. Open `http://localhost:3000`.
+Use the Node 24 version in `.node-version`. Run `npm ci` then `npm start` (PowerShell: `npm.cmd`). Development creates `data/FIRST_LOGIN.txt` only for a new farm. Change the initial password in Settings. Do not copy demo accounts into production.
 
-On Windows you can instead double-click `START_SONIA_4.bat`.
+For a separate blank demonstration farm run `npm run demo`, or `npm run demo:sample` for a pre-filled demonstration. Both use port 3016 by default and preserve their own data across restarts. They never open the normal `data/sonia4.db`. Stop one before starting the other. Set `DEMO_PORT` to change the port.
 
-## Important: GitHub Pages
-GitHub Pages can publish only the static frontend. Sonia 4.0's login, SQLite database and API require the Node backend. Do not publish the `data/` directory or secrets. Use GitHub for source control, and run the complete app on your VM/server.
+See [Sample workflow](docs/SAMPLE-WORKFLOW.md) for exact entries and expected totals.
 
-## Where to edit
-- Overall page/layout: `frontend/index.html`
-- Turquoise theme/UI: `frontend/css/main.css`
-- Browser functionality/API calls/charts/forms: `frontend/js/app.js`
-- API/database/authentication/business logic: `backend/server.js`
-- Logo and hen artwork: `frontend/assets/`
+## Roles
 
-## Database
-The app creates `data/sonia4.db` and applies all pending migrations at startup. Migration history is stored in `schema_migrations`; future upgrades must add a numbered file under `database/migrations/` rather than deleting the database.
+- Admin: users, flocks, customers, suppliers, pricing and every operational workflow.
+- Manager: production, feed usage, purchases/payments, sales/receipts, expenses, reports and audit. Master data is read-only.
+- Production Staff: production and feed usage; no cost, financial, supplier or customer endpoints. Corrections are restricted to their own same-day records. All roles can change their own password and manage their own 2FA.
 
-Create a disposable fixture with `npm.cmd run db:seed`. It writes `data/sonia4.seed.db`, which is ignored by Git.
+## Operational rules
 
-The access-control smoke test uses the seeded Admin, Manager, and Production Staff accounts. Start the app against the seed database, then run `npm.cmd run test:access-control`.
+Collected eggs = full trays × 30 + loose eggs. Damaged eggs are INCLUDED in collection; usable eggs = collected − damaged. Daily mortality automatically reduces the flock count. Current birds = initial birds − opening mortality − culls − production mortality after the optional baseline date. Leave the baseline date blank for a fresh flock. Close a flock to exclude it from active-bird totals; its history remains available. Production rate is collected eggs in laying flocks today divided by opening live birds today. Stage is a current classification, not a historical stage ledger.
 
-The correction smoke test uses the same seeded accounts and verifies edit, required-reason void, dashboard exclusion, audit snapshots, same-day staff corrections, and hard-delete rejection: `npm.cmd run test:audit-void`.
+Feed purchases are entered once in Purchases with category Feed and a feed type. Quantity is kg; total ÷ kg gives cost per kg. Feed Usage reduces stock against a flock. Backdated use/corrections cannot create negative stock on any date. Same-day purchases are available before same-day usage.
 
-The master-data smoke test verifies Admin-only flock/customer/supplier creation, generated IDs, flock lifecycle and counts, active lookup filtering, supplier references, balances, and history: `npm.cmd run test:master-data`.
+A sale uses the Admin price at creation. Its stored price never changes, including when editing quantity or notes. Payments are separate rows linked to a sale or purchase. Paid/Partially Paid/Unpaid and outstanding balances are derived from active payments; later payments do not create sales or expenses. Overpayment is rejected. To correct a payment, void it with a reason and record the replacement. To void a paid transaction, first void its payment records. Voiding erroneous bookkeeping is not a cash refund.
 
-## Master data
-Flocks, customers, and suppliers are reusable master records. Flocks have unique batch numbers, placement dates, initial/current bird counts, and Active/Closed status. Customers receive `CUS-0001`-style IDs and suppliers receive `SUP-0001`-style IDs. New production, feed, sales, and purchase entries can only select active master records; inactive or closed records remain available in history but do not appear in new-entry lookups.
+Every record edit and void requires a reason. Record updates, calculations and audit snapshots share one SQLite transaction. Masters with operational history should be deactivated/closed, not voided.
 
-## Access control
-Roles and permissions are defined centrally in `backend/access-control.js` and enforced by the API. Admin has full access, including users, master records, and pricing. Manager records production, sales, purchases, and expenses, but cannot create flocks, customers, or suppliers or change pricing. Production Staff records production and feed intake only and has no financial access. Denied requests are written to `audit_log`, and inactive sessions are rejected.
+Net profit is a **simplified purchase-expensed measure**: sales − purchases − operating expenses. Feed purchases are deducted once, not again on consumption. Payments do not change profit. This is not inventory-valued accounting and does not include depreciation, flock valuation or tax adjustments. Keep asset purchases and expense classifications under review; reports disclose this basis.
 
-## Configuration
-Copy `.env.development.example` to `.env.development` for local configuration. Use `.env.production.example` as the production template. Never commit `.env`, environment-specific files, database files, backups, or generated first-login credentials.
+## Existing installations
 
-## GitHub baseline
-The source repository is `Sonia 4.0 Farm`. Keep `main` as the production baseline and use feature branches for changes. Create the baseline tag after review with `git tag -a v4.0.0-baseline -m "Sonia 4.0 Farm development baseline"` and push it with `git push origin main --tags`.
+Migrations 001–006 are preserved. Migration 007 adds payment histories and independent feed usage without deleting existing data. Existing amount-paid values become opening payment entries. Legacy feed entries continue contributing to stock; legacy debts remain read-only and separate from new supplier balances because they may duplicate purchase liabilities. Inspect Legacy Records before importing opening balances. Historical mortality may duplicate flock-level mortality; migrated flocks use an explicit baseline date to avoid automatic double subtraction. Reconcile it with actual birds. Do not silently clear warnings without checking the data.
+
+Always back up and rehearse against a restored copy before applying migrations to a real farm. The original running application is not automatically restarted or migrated by development work.
+
+## Tests
+
+`npm run check` checks JavaScript syntax. `npm test` runs isolated workflow, permissions, validation, audit rollback, migration, online backup/restore, PDF response, authentication/2FA and session-restart tests. Tests create temporary databases and never target the running farm. Historical test script names redirect to this maintained suite.
+
+## Render
+
+The existing deployment branch is `upload`. Work on feature branches. **Do not push or merge into upload without explicit release approval.** GitHub Pages automation is removed; Actions run CI, while Render performs deployment. Configure Render to wait for the required CI checks rather than assuming Actions gate auto-deploy.
+
+Use `npm ci`, `npm start`, `/health`, the pinned Node version, `NODE_ENV=production`, a strong stable `SESSION_SECRET`, and a real first-run `ADMIN_PASSWORD`. Let Render supply PORT. Attach a persistent disk and configure:
+
+```
+DATA_DIR=/var/data/sonia
+DATABASE_PATH=/var/data/sonia/sonia4.db
+SESSION_PATH=/var/data/sonia/sessions.db
+BACKUP_DIR=/var/data/sonia/backups
+FARM_TIMEZONE=Africa/Nairobi
+```
+
+The disk must contain database sidecars as well as the database. It is available at runtime, so migrations run at server startup, not during the build. Inventory the old effective database location before switching paths: the former absolute-path bug could have written data inside the checkout. Restore/transfer a verified backup before changing DATABASE_PATH. Otherwise startup can create an empty farm.
+
+A Render service with a disk runs as a single instance and has deployment downtime. A shared session store alone would not make local SQLite scalable. Render settings and a real restart/redeploy persistence test must be verified separately; the repository cannot prove them.
+
+## Backup and restore
+
+Run `npm run backup` against the configured database. It uses the SQLite online backup API and integrity/foreign-key checks, including committed WAL data. Failed backups return a nonzero exit code. Windows shortcut: `scripts/BACKUP_SONIA_4.bat`.
+
+Restore to a NEW path: `node scripts/restore.js BACKUP.db NEW_DATABASE.db`. Existing destinations are refused. Verify the restored application in an isolated process, then stop production and switch its database path in a controlled maintenance window. Restore is not a code rollback: do not run older code against newer schema without validation. Session restoration is intentionally separate; stable sessions remain in their own disk file.
+
+Backups do not delete themselves. Monitor disk usage, retain a documented number of verified generations (recommended starting policy: 7 daily and 4 weekly), and copy backups to protected off-disk storage before removing old generations. Scheduling/off-disk credentials must be configured on the hosting service; no external backup destination has been assumed.
