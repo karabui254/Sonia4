@@ -10,11 +10,14 @@
     "test:access-control": "node --test --test-concurrency=1 scripts/workflow.test.js",
     "test:audit-void": "node --test --test-concurrency=1 scripts/workflow.test.js",
     "test:master-data": "node --test --test-concurrency=1 scripts/workflow.test.js",
-    "test": "node --test --test-concurrency=1 scripts/workflow.test.js scripts/mvp.test.js",
+    "test": "node --test --test-concurrency=1 scripts/workflow.test.js scripts/mvp.test.js scripts/postgres.test.js scripts/import-production.test.js",
     "check": "node scripts/check.js",
     "backup": "node scripts/backup.js",
     "db:restore": "node scripts/restore.js",
-    "build:production": "node scripts/build-production.js"
+    "build:production": "node scripts/build-production.js",
+    "test:postgres": "node --test scripts/postgres.test.js",
+    "backup:postgres": "node scripts/postgres-snapshot.js export",
+    "restore:postgres": "node scripts/postgres-snapshot.js restore-empty"
   },
   "engines": {
     "node": ">=24.0.0 <25"
@@ -28,7 +31,11 @@
     "helmet": "^8.1.0",
     "otplib": "^13.3.0",
     "pdfkit": "^0.17.2",
+    "pg": "^8.23.0",
     "qrcode": "^1.5.4"
   },
-  "main": "backend/server.js"
+  "main": "backend/server.js",
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
+  }
 }

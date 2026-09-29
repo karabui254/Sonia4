@@ -10,6 +10,7 @@ if (environment !== 'test') {
 const resolvePath = value => path.isAbsolute(value) ? path.normalize(value) : path.resolve(ROOT_DIR,value);
 const dataDir = resolvePath(process.env.DATA_DIR || 'data');
 const config = {
+  databaseUrl:process.env.DATABASE_URL || null,
   environment, isProduction:environment==='production', rootDir:ROOT_DIR,
   port:Number(process.env.PORT || 3000), host:process.env.HOST || (environment==='production'?'0.0.0.0':'127.0.0.1'), dataDir,
   databasePath:resolvePath(process.env.DATABASE_PATH || path.join(dataDir,'sonia4.db')),
@@ -23,4 +24,5 @@ if(!Number.isInteger(config.port)||config.port<1||config.port>65535) throw new E
 new Intl.DateTimeFormat('en-CA',{timeZone:config.timezone}).format();
 if(config.isProduction && (!config.sessionSecret || config.sessionSecret.length<32 || config.sessionSecret.includes('replace-with'))) throw new Error('Set a strong SESSION_SECRET (at least 32 characters)');
 if(config.isProduction && config.adminPassword?.includes('replace-with')) throw new Error('Replace the template ADMIN_PASSWORD');
+if(config.isProduction && process.env.RENDER==='true' && !config.databaseUrl) throw new Error('DATABASE_URL is required on Render. Refusing to create an ephemeral SQLite farm.');
 module.exports={config,resolvePath,createDevelopmentSecret:()=>crypto.randomBytes(48).toString('hex')};

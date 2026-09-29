@@ -1,6 +1,10 @@
 # Sonia 4.0 Farm
 
-Express + SQLite farm operations with role-controlled production, feed, sales, payments, corrections and reporting.
+Express + PostgreSQL/SQLite farm operations with role-controlled production, feed, sales, payments, corrections and reporting.
+
+## Render with Neon
+
+Set DATABASE_URL to the Neon connection URL and retain a strong, stable SESSION_SECRET. Farm data and sessions then use PostgreSQL. Render startup refuses to create an ephemeral SQLite database if DATABASE_URL is missing. See [Neon deployment and recovery](docs/NEON-MIGRATION.md).
 
 ## Local start
 
@@ -22,7 +26,7 @@ Feed purchases are entered once in Purchases with category Feed and a feed type.
 
 A sale uses the Admin price at creation. Its stored price never changes, including when editing quantity or notes. Payments are separate rows linked to a sale or purchase. Paid/Partially Paid/Unpaid and outstanding balances are derived from active payments; later payments do not create sales or expenses. Overpayment is rejected. To correct a payment, void it with a reason and record the replacement. To void a paid transaction, first void its payment records. Voiding erroneous bookkeeping is not a cash refund.
 
-Every record edit and void requires a reason. Record updates, calculations and audit snapshots share one SQLite transaction. Masters with operational history should be deactivated/closed, not voided.
+Every record edit and void requires a reason. Record updates, calculations and audit snapshots share one database transaction. Masters with operational history should be deactivated/closed, not voided.
 
 Net profit is a **simplified purchase-expensed measure**: sales − purchases − operating expenses. Feed purchases are deducted once, not again on consumption. Payments do not change profit. This is not inventory-valued accounting and does not include depreciation, flock valuation or tax adjustments. Keep asset purchases and expense classifications under review; reports disclose this basis.
 
