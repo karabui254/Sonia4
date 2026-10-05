@@ -413,15 +413,17 @@ function createOperations(db) {
       rows: [...months.values()]
     };
   }
-  async function dashboard(user) {
-    const prod = await list('production', user),
-      flocks = await list('flocks', user),
-      usage = await list('feed', user),
+  async function dashboard(user, flockId = null) {
+    const availableFlocks = await list('flocks', user);
+    if(flockId && !availableFlocks.some(f=>f.id===flockId)) throw new Error('Flock not found');
+    const prod = (await list('production', user)).filter(r=>!flockId||r.flock_id===flockId),
+      flocks = availableFlocks.filter(r=>!flockId||r.id===flockId),
+      usage = (await list('feed', user)).filter(r=>!flockId||r.flock_id===flockId),
       day = today();
     const collected = p => p.trays * 30 + p.loose_eggs;
     const eggsToday = prod.filter(p => p.date === day).reduce((n, p) => n + collected(p), 0);
     const active = flocks.filter(f => f.status === 'Active');
-    const allFlocks = await all('SELECT * FROM flocks WHERE is_voided=0');
+    const allFlocks = (await all('SELECT * FROM flocks WHERE is_voided=0')).filter(r=>!flockId||r.id===flockId);
     let denominator = 0,
       mortalityTotal = 0;
     for (const f of allFlocks) {
@@ -447,11 +449,12 @@ function createOperations(db) {
       damagedEggs: prod.reduce((n, p) => n + p.damaged_eggs, 0),
       activeBirds: active.reduce((n, f) => n + f.current_bird_count, 0),
       mortality: mortalityTotal,
-      productionRate: denominator ? money(layingEggs / denominator * 100) : null,
-      feedConsumed: usage.reduce((n, r) => n + r.consumed_kg, 0) + (await get('SELECT COALESCE(SUM(consumed_kg),0) n FROM feed_entries WHERE is_voided=0')).n
+      productionRate: denominator && prod.some(p=>p.date===day&&layingIds.has(p.flock_id)) ? money(layingEggs / denominator * 100) : null,
+      feedConsumed: usage.reduce((n, r) => n + r.consumed_kg, 0) + (await get('SELECT COALESCE(SUM(consumed_kg),0) n FROM feed_entries WHERE is_voided=0'+(flockId?' AND flock_id=?':''),...(flockId?[flockId]:[]))).n
     };
     const pending = allFlocks.filter(f => !f.mortality_reconciled).length;
     const result = {
+      flocks:availableFlocks.map(f=>({id:f.id,batch:f.batch,stage:f.stage})),flockId,
       today: day,
       metrics,
       stock: await stock(),

@@ -3,7 +3,7 @@ const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const present=window.SoniaPresentation;
 const money=n=>present.currency(n);
-let trendPeriod='7',trendRequest=0,reconciliationRows=[];
+let trendPeriod='7',trendMetric='rate',dashboardFlock='',trendRequest=0,reconciliationRows=[];
 let fieldSequence=0;
 let me=null,permissions=[],page='dashboard',generation=0,showVoided=false,rows=[],farmToday='',currentPrice=0;
 const can=p=>permissions.includes('*')||permissions.includes(p);
@@ -62,7 +62,7 @@ async function go(next){
  page=next;const token=++generation;navigation();document.body.classList.remove('menu-open');$('#menuToggle').setAttribute('aria-expanded','false');
  const title=nav.find(n=>n[0]===page)?.[1]||page;$('#main').innerHTML=`<h1>${title}</h1><p>Loading…</p>`;
  try{
-  if(page==='dashboard'){const d=await api('/dashboard');if(token!==generation)return;farmToday=d.today;renderDashboard(d);return}
+  if(page==='dashboard'){const d=await api('/dashboard'+(dashboardFlock?'?flock_id='+dashboardFlock:''));if(token!==generation)return;farmToday=d.today;renderDashboard(d);return}
   if(schemas[page]){
    const kind=page;const data=await api('/'+kind+(showVoided?'?include_voided=1':''));
    if(kind==='sales')currentPrice=(await api('/pricing')).find(r=>r.name==='egg_tray').value;
@@ -71,7 +71,7 @@ async function go(next){
    $('#main').innerHTML=`<h1>${title}</h1>${kind==='feed'?`<p>Record feed use against a flock. ${can('purchases:write')?'<button data-page="purchases">Record a feed purchase</button>':''}</p><div class="cards">${stock.map(s=>`<div class="card">${esc(s.type)}<strong>${s.available_kg} kg</strong></div>`).join('')}</div>`:''}${form?`<section class="panel"><h2>New ${kind==='feed'?'feed usage':kind==='sales'?'sale':kind==='purchases'?'purchase':'record'}</h2>${form}</section>`:''}<section class="panel"><div class="sectionhead"><h2>Records</h2><label><input type="checkbox" id="showVoided" ${showVoided?'checked':''}> Show voided</label></div>${table(kind,data)}</section>`;
    bindRecord(kind);$('#showVoided').onchange=e=>{showVoided=e.target.checked;go(kind)};return;
   }
-  if(page==='reports'){$('#main').innerHTML='<h1>Reports</h1><section class="panel"><p>Reports use the same calculations as the dashboard and exclude voided transactions.</p><button data-download="report">Download Farm PDF</button> <button data-download="production-report">Download Production PDF</button></section>';return}
+  if(page==='reports'){const r=await api('/report-data');if(token!==generation)return;$('#main').innerHTML=`<h1>Farm Management Report</h1><section class="panel"><p>Two-page executive PDF · production last 60 days · finances through ${esc(r.end)} · KES · Africa/Nairobi.</p><p>${esc(r.status)}</p><button data-download="report">Download Executive PDF</button> <button data-download="production-report">Download Detailed Production PDF</button><details><summary>View report details &amp; full appendix</summary><h2>Source totals</h2>${plainTable([r.finance],['sales','purchases','expenses','supplierOutstanding','customerOutstanding'])}<h2>All unpaid supplier invoices</h2>${plainTable(r.payables,['name','description','date','outstanding','days'])}<h2>All customer balances</h2>${plainTable(r.receivables,['name','date','outstanding','days'])}<h2>Data Notes</h2>${r.notes.map(n=>`<p>${esc(n)}</p>`).join('')}<p>Invoice age is not overdue days; due dates are not recorded.</p><a href="/api/report-data" target="_blank" rel="noopener">Open computed report values (JSON)</a></details></section>`;return}
   if(page==='audit'){const data=await api('/audit-log');if(token!==generation)return;$('#main').innerHTML=`<h1>Audit Log</h1><p>Latest 500 events. Edits and voids retain their reasons and snapshots.</p><section class="panel tablewrap"><table><thead><tr><th>When / Who</th><th>Action / Record</th><th>Reason</th><th>Before</th><th>After</th></tr></thead><tbody>${data.map(r=>`<tr><td>${esc(r.timestamp)}<br>${esc(r.username)}</td><td>${esc(r.action)} · ${esc(r.table_name)} #${r.record_id??''}</td><td>${esc(r.reason)}</td><td><pre>${esc(r.old_values)}</pre></td><td><pre>${esc(r.new_values)}</pre></td></tr>`).join('')}</tbody></table></section>`;return}
   if(page==='legacy'){const data=await api('/legacy');if(token!==generation)return;$('#main').innerHTML=`<h1>Legacy Records</h1><p class="notice">Read-only historical feed and debt records. Feed quantities contribute to stock; legacy debt is shown separately and excluded from purchase-linked balances until reconciled. Avoid entering the same purchase twice.</p>${data.notes.map(n=>`<p>${esc(n.message)}</p>`).join('')}<section class="panel"><h2>Legacy feed entries</h2>${plainTable(data.feed,['date','type','supplier','received_kg','consumed_kg','total_cost','is_voided'])}<h2>Legacy supplier debts</h2>${plainTable(data.debts,['supplier','opening_debt','feed_credit','other_credit','paid','remaining','is_voided'])}</section>`;return}
   if(page==='mortality-review'){await mortalityReview(token);return}
@@ -84,41 +84,46 @@ function kpi(label,value,secondary,{unit='',status='',icon='○',info=''}={}){
  return `<article class="metric-card ${status}"><div class="metric-label"><span aria-hidden="true" class="metric-icon">${icon}</span><span>${label}</span>${info?`<button class="metric-info" type="button" aria-label="${esc(info)}" title="${esc(info)}">i</button>`:''}</div><div class="metric-value" title="${esc(formatted.full)}" aria-label="${esc(formatted.full)}">${esc(formatted.text)}</div><p class="metric-support">${secondary}</p></article>`;
 }
 function renderDashboard(d){
- const m=d.metrics,hasToday=d.trend.some(r=>r.date===d.today),abnormal=m.productionRate>100;
- $('#main').innerHTML=`<div class="page-heading"><div><h1>Farm Dashboard</h1><p class="page-context">${present.date(d.today,true)}</p></div><span class="farm-badge">Farm overview</span></div>
+ const m=d.metrics,hasToday=d.hasProductionToday??d.trend.some(r=>r.date===d.today),abnormal=m.productionRate>100;
+ $('#main').innerHTML=`<div class="page-heading"><div><h1>Farm Dashboard</h1><p class="page-context">${present.date(d.today,true)}</p></div><label class="flock-filter">Flock <select id="dashboardFlock"><option value="">All flocks</option>${d.flocks.map(f=>`<option value="${f.id}" ${String(f.id)===dashboardFlock?'selected':''}>${esc(f.batch)} - ${esc(f.stage)}</option>`).join('')}</select></label></div>
  <section class="dashboard-section" aria-labelledby="production-heading"><h2 id="production-heading">Production</h2><div class="dashboard-metrics">
  ${kpi('Eggs Today',hasToday?m.eggsToday:null,hasToday?'Collected today':'No production recorded today',{unit:'eggs',icon:'◉'})}
- ${kpi('Production Rate',m.productionRate===null?null:present.number(m.productionRate)+'%',abnormal?'⚠ Above expected range<br>Check flock population or today’s production':m.productionRate===null?'No live laying-bird baseline':'Today · laying flocks',{status:abnormal?'warning':'',icon:'↗',info:"Today's eggs ÷ opening live laying birds × 100. Values above 100% need review."})}
+ ${kpi('Production Rate',m.productionRate===null?null:present.number(m.productionRate)+'%',abnormal?'⚠ Above expected range<br>Check flock population or today’s production':m.productionRate===null?(hasToday?'Incomplete collection or unavailable laying baseline':'Not recorded today'):'Today · laying flocks',{status:abnormal?'warning':'',icon:'↗',info:"Today's eggs ÷ opening live laying birds × 100. Values above 100% need review."})}
  ${kpi('Active Birds',m.activeBirds,'In active flocks',{unit:'birds',icon:'◇'})}
  ${kpi('Mortality',m.mortality,'All time · opening and applicable production deaths',{status:m.mortality>0?'warning':'',icon:'+'})}</div></section>
- <section class="panel trend-panel" aria-labelledby="trend-heading"><div class="sectionhead"><div><h2 id="trend-heading">Egg Production Trend</h2><p class="muted">Recorded egg collection, aggregated by period</p></div><div class="period-controls" role="group" aria-label="Production trend period">${[['7','7 Days'],['30','30 Days'],['monthly','Monthly']].map(([value,label])=>`<button data-period="${value}" aria-pressed="${trendPeriod===value}">${label}</button>`).join('')}</div></div><div id="productionTrend" aria-live="polite"><p class="empty-state">Loading production trend…</p></div></section>
+ <section class="panel trend-panel" aria-labelledby="trend-heading"><div class="sectionhead"><div><h2 id="trend-heading">Production Performance</h2><p class="muted">Daily performance for the selected flock; red marks rates below 90%.</p></div><div class="period-controls" role="group" aria-label="Production trend period">${[['7','7 Days'],['30','30 Days'],['60','60 Days'],['monthly','12 Months']].map(([value,label])=>`<button data-period="${value}" aria-pressed="${trendPeriod===value}">${label}</button>`).join('')}</div></div><div class="period-controls metric-controls" role="group" aria-label="Trend measure"><button data-metric="rate" aria-pressed="${trendMetric==='rate'}">Lay rate %</button><button data-metric="eggs" aria-pressed="${trendMetric==='eggs'}">Egg count</button></div><div id="productionTrend" aria-live="polite"><p class="empty-state">Loading production trend…</p></div></section>
  <section class="dashboard-section" aria-labelledby="operations-heading"><h2 id="operations-heading">Operations</h2><div class="dashboard-metrics">
  ${kpi('Total Eggs Collected',m.eggs||null,m.eggs?'All time':'No egg collection recorded',{unit:'eggs',icon:'◉'})}
  ${kpi('Total Damaged Eggs',m.damagedEggs,'All time · included in collection',{unit:'eggs',icon:'◇'})}
  ${kpi('Total Feed Consumed',m.feedConsumed||null,m.feedConsumed?'All time':'No feed usage recorded',{unit:'kg',icon:'≋'})}</div>
- <h3 class="subsection-heading">Feed Stock</h3><div class="dashboard-metrics secondary-metrics">${d.stock.map(row=>kpi(esc(row.type),row.available_kg,row.available_kg<=0?'No available stock':'Available for use',{unit:'kg',status:row.available_kg<=0?'warning':'',icon:'≋'})).join('')}</div></section>
- ${can('sales:read')?`<section class="dashboard-section" aria-labelledby="financial-heading"><h2 id="financial-heading">Financial</h2><div class="dashboard-metrics">
+ <h3 class="subsection-heading">Feed Stock · whole farm</h3><div class="dashboard-metrics secondary-metrics">${d.stock.map(row=>kpi(esc(row.type),row.available_kg,row.available_kg<=0?'No available stock':'Available for use',{unit:'kg',status:row.available_kg<=0?'warning':'',icon:'≋'})).join('')}</div></section>
+ ${can('sales:read')?`<section class="dashboard-section" aria-labelledby="financial-heading"><h2 id="financial-heading">Financial · whole farm</h2><p class="muted">Sales, purchases and balances are not assigned to individual flocks.</p><div class="dashboard-metrics">
  ${kpi('Sales',m.sales||null,m.sales?'All time':'No sales recorded',{unit:'currency',icon:'↗'})}
  ${kpi('Purchases',m.purchases||null,m.purchases?'All time':'No purchases recorded',{unit:'currency',icon:'↙'})}
  ${kpi('Operating Expenses',m.expenses||null,m.expenses?'All time':'No expenses recorded',{unit:'currency',icon:'≡'})}
  ${kpi('Simplified Net Profit',m.netProfit,'All time · purchase-expensed',{unit:'currency',status:m.netProfit<0?'loss':m.netProfit>0?'positive':'',icon:'↗'})}</div><details class="calculation-note"><summary>How simplified profit is calculated</summary><p>${esc(d.profitBasis)}</p></details></section>
- <section class="dashboard-section outstanding-section" aria-labelledby="outstanding-heading"><h2 id="outstanding-heading">Outstanding Accounts</h2><div class="dashboard-metrics secondary-metrics">${kpi('Customer Outstanding',m.customerOutstanding,m.customerOutstanding?'Awaiting customer receipts':'No outstanding customer balance',{unit:'currency',status:m.customerOutstanding>0?'warning':'',icon:'◇'})}${kpi('Supplier Outstanding',m.supplierOutstanding,m.supplierOutstanding?'Awaiting supplier payments':'No outstanding supplier balance',{unit:'currency',status:m.supplierOutstanding>0?'warning':'',icon:'◇'})}</div></section>`:''}
+ <section class="dashboard-section outstanding-section" aria-labelledby="outstanding-heading"><h2 id="outstanding-heading">Outstanding Accounts · whole farm</h2><div class="dashboard-metrics secondary-metrics">${kpi('Customer Outstanding',m.customerOutstanding,m.customerOutstanding?'Awaiting customer receipts':'No outstanding customer balance',{unit:'currency',status:m.customerOutstanding>0?'warning':'',icon:'◇'})}${kpi('Supplier Outstanding',m.supplierOutstanding,m.supplierOutstanding?'Awaiting supplier payments':'No outstanding supplier balance',{unit:'currency',status:m.supplierOutstanding>0?'warning':'',icon:'◇'})}</div></section>`:''}
  ${d.notes.length?`<section class="panel"><h2>Data Review</h2>${d.notes.map(n=>`<p class="notice warning">${esc(n)}</p>`).join('')}${can('flocks:write')?'<button data-page="mortality-review">Review mortality sources</button>':''}</section>`:''}
  <section class="panel"><h2>Recent Production</h2>${table('production',d.production,false)}</section>`;
+ $('#dashboardFlock').onchange=e=>{dashboardFlock=e.target.value;go('dashboard')};
  loadTrend();
 }
 async function loadTrend(){
- const request=++trendRequest,period=trendPeriod;
+ const request=++trendRequest,period=trendPeriod,metric=trendMetric;
  document.querySelectorAll('[data-period]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.period===period)));
- const host=$('#productionTrend');if(!host)return;host.innerHTML='<p class="empty-state">Loading production trend…</p>';
+ document.querySelectorAll('[data-metric]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.metric===metric)));
+ const host=$('#productionTrend');if(!host)return;host.innerHTML='<p class="empty-state">Loading performance…</p>';
  try{
-  const data=await api('/production-trend?period='+period);if(request!==trendRequest||page!=='dashboard'||!host.isConnected)return;
-  if(!data.rows.length){host.innerHTML='<div class="empty-state"><strong>No production recorded in this period</strong><p>Recorded egg collections will appear here. Try another period.</p></div>';return}
-  const a=data.rows,max=Math.max(1,...a.map(r=>r.eggs));
-  const x=i=>30+i*700/Math.max(1,a.length-1),y=r=>210-r.eggs/max*185;
-  const labels=[...new Set([0,Math.floor((a.length-1)/3),Math.floor((a.length-1)*2/3),a.length-1])];
-  host.innerHTML=`<div class="chart-scale"><span>${present.number(max)} eggs</span><span>${period==='monthly'?'Recorded months · last 12 months':'Recorded days · last '+period+' days'}</span></div><svg class="production-chart" viewBox="0 0 760 235" preserveAspectRatio="none" role="img" aria-label="Collected eggs by ${period==='monthly'?'month':'day'}. Exact values are in the data table."><path d="M20 25H740 M20 117H740 M20 210H740" class="chart-grid"/><polyline points="${a.map((r,i)=>x(i)+','+y(r)).join(' ')}"/>${a.map((r,i)=>`<circle cx="${x(i)}" cy="${y(r)}" r="4"><title>${esc(r.date)}: ${r.eggs} eggs</title></circle>`).join('')}</svg><div class="chart-labels">${labels.map(i=>`<span>${period==='monthly'?esc(a[i].date):esc(new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',timeZone:'UTC'}).format(new Date(a[i].date+'T12:00:00Z')))}</span>`).join('')}</div><details class="chart-data"><summary>View production values</summary>${plainTable(a,['date','eggs','damaged'])}</details>`;
- }catch(e){if(host.isConnected&&page==='dashboard')host.innerHTML=`<p class="error" role="alert">${esc(e.message)}</p><button data-period="${period}">Retry trend</button>`}
+  const data=await api('/performance?period='+period+(dashboardFlock?'&flock_id='+dashboardFlock:''));if(request!==trendRequest||page!=='dashboard'||!host.isConnected)return;
+  const a=data.rows,key=metric==='rate'?'rate':'eggs',unit=metric==='rate'?'%':' eggs',valid=a.filter(r=>r[key]!==null);
+  if(!valid.length){host.innerHTML='<p class="empty-state">No complete laying-flock production recorded for this selection. Missing days are not zero.</p>';return}
+  const max=Math.max(metric==='rate'?100:1,...valid.map(r=>r[key])),x=i=>48+i*684/Math.max(1,a.length-1),y=v=>210-v/max*175;
+  let path='',open=false;a.forEach((r,i)=>{if(r[key]===null){open=false;return}path+=(open?' L':' M')+x(i)+' '+y(r[key]);open=true});
+  const labels=[0,Math.floor((a.length-1)/2),a.length-1];
+  host.innerHTML=`<div class="performance-summary"><span>Period lay rate: <strong>${data.summary.rate===null?'N/A':data.summary.rate.toFixed(1)+'%'}</strong></span><span>Below target: <strong>${data.summary.daysBelow} / ${data.summary.daysRecorded} recorded days</strong></span><span>Best / worst: <strong>${data.summary.best===null?'N/A':data.summary.best.toFixed(1)+'% / '+data.summary.worst.toFixed(1)+'%'}</strong></span></div>
+  <svg class="performance-chart" viewBox="0 0 760 250" role="img" aria-label="Daily ${metric==='rate'?'lay rate with 90 percent target':'egg count'}; missing days are gaps. Values in table below."><text x="5" y="22">${metric==='rate'?'Lay %':'Eggs'}</text><text x="5" y="43">${present.number(max)}</text><text x="25" y="214">0</text><path class="axis" d="M45 30V210H736"/>${metric==='rate'?`<path class="target" d="M48 ${y(90)}H735"/><text x="640" y="${y(90)-7}">90% target</text>`:''}<path class="series" d="${path}"/>${a.map((r,i)=>r[key]===null?'':`<circle cx="${x(i)}" cy="${y(r[key])}" r="${r.estimated?4.5:3.5}" class="${r.rate===null?'unknown':r.rate<90?'below':r.rate>100?'watch':'healthy'} ${r.estimated?'estimated':''}"><title>${esc(r.date)}: ${r[key].toFixed(1)}${unit} — ${esc(r.status)}${r.estimated?' (estimated baseline / collection)':''}</title></circle>`).join('')}${labels.map(i=>`<text x="${x(i)}" y="239" text-anchor="${i===0?'start':i===a.length-1?'end':'middle'}">${esc(a[i].date)}</text>`).join('')}</svg>
+  <p class="muted">Red: below 90% · Green: 90–100% · Amber: above 100%, check counts · Hollow points: estimates. Gaps: missing or incomplete days.</p><details><summary>Calculation notes</summary>${data.notes.map(n=>`<p>${esc(n)}</p>`).join('')}</details><details class="chart-data"><summary>View daily performance values</summary>${plainTable(a.map(r=>({...r,rate:r.rate===null?'Not recorded / incomplete':r.rate.toFixed(1)+'%',estimated:r.estimated?'Yes':'No'})),['date','eggs','openingBirds','rate','status','estimated'])}</details>`;
+ }catch(e){if(host.isConnected)host.innerHTML=`<p class="error">${esc(e.message)}</p><button data-period="${period}">Retry</button>`}
 }
 async function mortalityReview(token){
  const data=await api('/mortality-review');if(token!==generation)return;reconciliationRows=data;
@@ -159,6 +164,7 @@ async function twoFactor(){
 }
 async function download(name){const r=await fetch(`/api/${name}.pdf`);if(r.status===401){sessionExpired();return}if(!r.ok)throw new Error((await r.json()).error||'Download failed');const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download=`sonia-${name}.pdf`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try{
+ if(b.dataset.metric){trendMetric=b.dataset.metric;await loadTrend();return}
  if(b.dataset.period){trendPeriod=b.dataset.period;await loadTrend();return}
  if(b.dataset.reconcile){reviewFlock(Number(b.dataset.reconcile));return}
  if(b.dataset.page){await go(b.dataset.page);return}

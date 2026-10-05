@@ -356,11 +356,11 @@ test('HTTP roles, persistent sessions, user security, PDF and API errors', async
     child.stderr.on('data', s => {
       logs += s;
     });
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 200; i++) {
       try {
         if ((await fetch(base + '/health')).ok) return;
       } catch {}
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 100));
     }
     throw new Error(logs);
   }
@@ -421,6 +421,11 @@ test('HTTP roles, persistent sessions, user security, PDF and API errors', async
     }, m)).status, 403);
     assert.equal((await req('/suppliers', 'GET', undefined, s)).status, 403);
     assert.equal((await req('/feed', 'GET', undefined, m)).status, 200);
+    assert.equal((await req('/performance?period=30','GET',undefined,s)).status,200);
+    assert.equal((await req('/performance?period=bad','GET',undefined,s)).status,400);
+    assert.equal((await req('/dashboard?flock_id=99999','GET',undefined,s)).status,400);
+    assert.equal((await req('/report-data','GET',undefined,s)).status,403);
+    assert.equal((await req('/report-data','GET',undefined,m)).status,200);
     assert.equal((await req('/dashboard', 'GET', undefined, s)).body.metrics.sales, undefined);
     assert.equal((await req('/production', 'POST', {
       date: today()

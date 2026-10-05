@@ -293,7 +293,39 @@ async function main() {
       ok: true
     });
   }));
-  app.get('/api/dashboard', auth, permit('dashboard:read'), route(async (req, res) => res.json(await op.dashboard(req.user))));
+  app.get('/api/dashboard', auth, permit('dashboard:read'), route(async (req, res) => {
+    const flockId = req.query.flock_id ? number(req.query.flock_id, 'Flock', 1, true) : null;
+    const d = await op.dashboard(req.user, flockId);
+    const performance = require('./analytics').series(await analyticsData(), {
+      end: today(),
+      days: 1,
+      flockId
+    });
+    const point = performance.rows[0];
+    if (performance.duplicates.length) d.notes.push(performance.duplicates.length + ' identical production rows need review. The performance chart and executive report exclude duplicates; operational bird counts still reflect stored entries.');
+    d.metrics.productionRate = point.rate;
+    d.hasProductionToday = point.eggs !== null;
+    res.json(d);
+  }));
+  async function analyticsData(financial = false) {
+    const names = ['flocks', 'production', 'audit_log', ...(financial ? ['sales', 'purchases', 'payments', 'expenses', 'feed_usage', 'feed_entries', 'customers', 'suppliers'] : [])];
+    return op.transaction(async () => Object.fromEntries(await Promise.all(names.map(async name => [name, await op.all('SELECT * FROM ' + name + (name === 'audit_log' ? " WHERE table_name='flocks'" : ''))]))));
+  }
+  app.get('/api/performance', auth, permit('production:read'), route(async (req, res) => {
+    const period = req.query.period || '7';
+    if (!['7', '30', '60', 'monthly'].includes(period)) throw new Error('Invalid period');
+    const flockId = req.query.flock_id ? number(req.query.flock_id, 'Flock', 1, true) : null;
+    const data = await analyticsData();
+    if (flockId && !data.flocks.some(f => f.id === flockId && !f.is_voided)) throw new Error('Flock not found');
+    res.json(require('./analytics').series(data, {
+      end: today(),
+      days: period === 'monthly' ? 365 : Number(period),
+      flockId
+    }));
+  }));
+  app.get('/api/report-data', auth, permit('reports:read'), route(async (req, res) => res.json(require('./analytics').report(await analyticsData(true), {
+    end: today()
+  }))));
   app.get('/api/mortality-review', auth, permit('flocks:write'), route(async (req, res) => res.json(await op.mortalityReport())));
   app.post('/api/mortality-review/:id', auth, permit('flocks:write'), route(async (req, res) => res.json(await op.reconcileMortality(number(req.params.id, 'ID', 1, true), req.body, req.user))));
   app.get('/api/production-trend', auth, permit('production:read'), route(async (req, res) => res.json(await op.productionTrend(req.query.period || '7'))));
@@ -393,6 +425,15 @@ async function main() {
     });
   }));
   for (const name of ['report', 'production-report']) app.get(`/api/${name}.pdf`, auth, permit('reports:read'), route(async (req, res) => {
+    if (name === 'report') {
+      const data = require('./analytics').report(await analyticsData(true), {
+        end: today()
+      });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename=sonia-report.pdf');
+      require('./executive-pdf').renderReport(data).pipe(res);
+      return;
+    }
     const d = await op.dashboard(req.user),
       rows = await op.list('production', req.user),
       doc = new PDFDocument({

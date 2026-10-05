@@ -10,7 +10,7 @@
     "test:access-control": "node --test --test-concurrency=1 scripts/workflow.test.js",
     "test:audit-void": "node --test --test-concurrency=1 scripts/workflow.test.js",
     "test:master-data": "node --test --test-concurrency=1 scripts/workflow.test.js",
-    "test": "node --test --test-concurrency=1 scripts/workflow.test.js scripts/mvp.test.js scripts/postgres.test.js scripts/import-production.test.js",
+    "test": "node --test --test-concurrency=1 scripts/workflow.test.js scripts/mvp.test.js scripts/postgres.test.js scripts/import-production.test.js scripts/analytics.test.js",
     "check": "node scripts/check.js",
     "backup": "node scripts/backup.js",
     "db:restore": "node scripts/restore.js",

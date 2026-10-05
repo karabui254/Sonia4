@@ -1,7 +1,7 @@
 name: Sonia workflow checks
 on:
   push:
-    branches: [upload, main, 'feature/**']
+    branches: [upload, main, 'feature/**', 'development/**']
   pull_request:
 permissions:
   contents: read
